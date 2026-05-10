@@ -129,6 +129,18 @@ For a quick local check:
 - `/start`
 - `/status`
 - `/reset`
+- `/bg <task>` starts a detached background Codex task.
+- `/background <task>` is an alias for `/bg`.
+- `/tasks` lists recent background tasks.
+- `/task <task_id>` shows one background task's latest status and result.
+
+You can also start a background task with a normal text message that begins with `background:`, `bg:`, `run in background:`, or `start background task:`.
+
+Normal text and voice requests still run as foreground turns. Foreground turns keep the Telegram typing or recording indicator active until the final reply has been sent. While Codex is running, the bridge sends small status updates every couple of minutes based on streamed Codex events, such as command execution, SSH work, or final reply preparation.
+
+Background tasks run in separate Codex sessions and do not block the normal chat. The bot sends a short acknowledgement immediately, occasional progress updates, and a completion notification when the task finishes. The first implementation keeps background task state in memory; restarting the operator clears the `/tasks` view, though completed messages remain in the SQLite journal.
+
+Background tasks are disabled in `restricted` mode for the first implementation so they cannot bypass approval cards. Use `safe` or `full` mode for detached work, or send the request normally to get an approval card.
 
 When restricted mode is enabled, regular text and voice-note requests produce a proposal card with:
 
@@ -180,4 +192,6 @@ Codex also persists its own session data under the normal local Codex home.
 - Codex keeps one resumed conversation per Telegram chat id.
 - Safe mode proposal generation uses Codex in read-only, ephemeral mode so proposal creation does not intentionally modify files or reuse the active coding session.
 - For voice-note requests, the Telegram `recording voice note` indicator is kept alive until the reply delivery finishes.
+- Foreground tasks send compact status updates every couple of minutes while Codex is still running.
+- Explicit background tasks use detached Codex sessions so the foreground chat can keep responding.
 - If an agent exceeds the configured timeout, the bridge returns an operator error and unlocks the chat for the next request.
