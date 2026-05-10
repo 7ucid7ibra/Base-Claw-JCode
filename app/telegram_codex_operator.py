@@ -444,16 +444,17 @@ class CodexBridge:
         raw_line: str,
         *,
         stderr_chunks: list[str],
-    ) -> tuple[str, str, bool]:
+    ) -> tuple[str, str, bool, bool]:
         try:
             event = json.loads(raw_line)
         except json.JSONDecodeError:
-            return "", "", False
+            return "", "", False, False
 
         event_type = event.get("type", "")
         session_id = ""
         agent_message = ""
         completed = False
+        final_answer = False
 
         if event_type == "thread.started":
             session_id = str(event.get("thread_id", "") or "")
@@ -471,15 +472,18 @@ class CodexBridge:
             payload_type = payload.get("type")
             if payload_type == "agent_message" and payload.get("phase") == "final_answer":
                 agent_message = str(payload.get("message") or "")
+                final_answer = True
             if payload_type == "task_complete":
                 agent_message = str(payload.get("last_agent_message") or "")
                 completed = True
+                final_answer = True
 
         if event_type in {"task_complete", "turn.completed"}:
             agent_message = str(event.get("last_agent_message") or event.get("message") or "")
             completed = True
+            final_answer = True
 
-        return session_id, agent_message, completed
+        return session_id, agent_message, completed, final_answer
 
     @staticmethod
     def _stream_reader(
@@ -497,6 +501,7 @@ class CodexBridge:
         process: Optional[subprocess.Popen[str]] = None
         stderr_chunks: list[str] = []
         last_agent_message = ""
+        last_final_message = ""
         session_id = ""
         completion_seen = False
         final_message_seen_at: Optional[float] = None
@@ -539,13 +544,13 @@ class CodexBridge:
 
             deadline = time.monotonic() + self.timeout_seconds
             while True:
-                if completion_seen and last_agent_message:
+                if completion_seen and last_final_message:
                     terminate_process_tree(process)
-                    return session_id, last_agent_message
+                    return session_id, last_final_message
 
                 if (
                     final_message_seen_at is not None
-                    and last_agent_message
+                    and last_final_message
                     and time.monotonic() - final_message_seen_at >= CODEX_FINAL_MESSAGE_GRACE_SECONDS
                     and process.poll() is None
                 ):
@@ -555,7 +560,7 @@ class CodexBridge:
                         process.pid,
                     )
                     terminate_process_tree(process)
-                    return session_id, last_agent_message
+                    return session_id, last_final_message
 
                 if process.poll() is not None and stdout_closed and stderr_closed:
                     break
@@ -563,13 +568,13 @@ class CodexBridge:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     terminate_process_tree(process)
-                    if last_agent_message:
+                    if last_final_message:
                         LOGGER.warning(
                             "Codex timed out after %ss, but a final message was recovered pid=%s",
                             self.timeout_seconds,
                             process.pid,
                         )
-                        return session_id, last_agent_message
+                        return session_id, last_final_message
                     raise RuntimeError(f"Codex timed out after {self.timeout_seconds} seconds")
 
                 try:
@@ -592,7 +597,7 @@ class CodexBridge:
                 raw_line = line.strip()
                 if not raw_line:
                     continue
-                new_session_id, agent_message, completed = self._record_codex_event(
+                new_session_id, agent_message, completed, final_answer = self._record_codex_event(
                     raw_line,
                     stderr_chunks=stderr_chunks,
                 )
@@ -600,14 +605,16 @@ class CodexBridge:
                     session_id = new_session_id
                 if agent_message:
                     last_agent_message = agent_message
-                    final_message_seen_at = time.monotonic()
+                    if final_answer:
+                        last_final_message = agent_message
+                        final_message_seen_at = time.monotonic()
                 if completed:
                     completion_seen = True
 
         except BrokenPipeError as exc:
             raise RuntimeError("Codex process closed before it accepted the prompt") from exc
         finally:
-            if process is not None and process.poll() is None and not (completion_seen and last_agent_message):
+            if process is not None and process.poll() is None and not (completion_seen and last_final_message):
                 terminate_process_tree(process)
 
         assert process is not None
@@ -617,7 +624,7 @@ class CodexBridge:
             raise RuntimeError(friendly_codex_error(detail, return_code))
         if not last_agent_message:
             raise RuntimeError("Codex returned no final agent message")
-        return session_id, last_agent_message
+        return session_id, last_final_message or last_agent_message
 
     def send(self, prompt: str, session_id: Optional[str]) -> tuple[str, str]:
         if session_id:
