@@ -20,6 +20,7 @@ This is a local high-trust agent bridge, not a hardened multi-user service.
 
 - `restricted` sends a Telegram approval card before each task. Proposal generation is read-only; approved execution uses Codex workspace-write sandboxing.
 - `safe` uses Codex workspace-write sandboxing and treats the configured workspace as the normal operating area.
+- `code` uses Codex workspace-write sandboxing from the app repository root and auto-commits pre-run checkpoints plus agent changes so code edits can be reverted.
 - `full` bypasses Codex approvals and sandboxing. Use it only for a private bot and a trusted chat id.
 
 Anyone who can use the allowed Telegram chat can ask the local agent to perform actions with the configured safety level.

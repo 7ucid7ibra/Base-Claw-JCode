@@ -21,6 +21,7 @@ This operator is intentionally high trust. It is useful as a private local-agent
 
 - In `restricted` mode, every normal task gets a Telegram approval card first.
 - In `safe` mode, Codex uses workspace-write sandboxing.
+- In `code` mode, Codex can edit this app repository with workspace-write sandboxing and automatic git commits.
 - In `full` mode, Codex uses `--dangerously-bypass-approvals-and-sandbox`.
 - Codex runs with the same local permissions as this user account.
 - It should only be allowed for your own Telegram chat id.
@@ -155,6 +156,7 @@ Safety modes:
 
 - `restricted`: sends a Telegram approval card before each task. The proposal step is read-only and ephemeral; approved execution uses Codex `workspace-write` sandboxing.
 - `safe`: runs Codex with `workspace-write` sandboxing. Reading and writing inside the workspace are permitted. Outside-workspace work should be requested explicitly and may be blocked by the sandbox.
+- `code`: runs Codex with `workspace-write` sandboxing from the app repository root so it can edit its own code. The bridge commits any existing repo changes before the run as a checkpoint, then commits agent changes after the run for easy revert.
 - `full`: runs Codex with `--dangerously-bypass-approvals-and-sandbox`.
 
 ## Persistence

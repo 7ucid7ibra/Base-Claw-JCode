@@ -191,10 +191,11 @@ The operator reads its own dedicated config from `.env.telegram-operator`, so it
 
 `.env.telegram-operator` is local-only and ignored by git. Start from `.env.telegram-operator.example`, then fill in your own bot token and allowed chat id. If a real bot token was ever committed or shared, rotate it before publishing the project.
 
-The UI has three safety modes:
+The UI has four safety modes:
 
 - `Restricted`: sends a Telegram approval card before each task. Proposal generation is read-only; approved execution uses Codex workspace-write sandboxing.
 - `Safe`: lets Codex read/write inside the workspace with workspace-write sandboxing. It should ask before outside-workspace work.
+- `Code access`: lets Codex edit this app repository with workspace-write sandboxing. Before the run, any existing repo changes are committed as a checkpoint; after the run, agent changes are committed so they can be reverted with git.
 - `Full access`: runs Codex with full local access and no sandbox.
 
 The older `TELEGRAM_OPERATOR_SAFE_MODE` flag is kept only for compatibility. New settings use `TELEGRAM_OPERATOR_SAFETY_MODE`.

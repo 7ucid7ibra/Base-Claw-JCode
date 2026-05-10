@@ -80,9 +80,10 @@ WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
 SAFETY_MODE_LABELS = {
     "restricted": "Restricted: approve every task",
     "safe": "Safe: workspace access",
+    "code": "Code access: app repo + git commits",
     "full": "Full access",
 }
-SAFETY_LABELS = [SAFETY_MODE_LABELS[key] for key in ("restricted", "safe", "full")]
+SAFETY_LABELS = [SAFETY_MODE_LABELS[key] for key in ("restricted", "safe", "code", "full")]
 SAFETY_LABEL_TO_MODE = {label: key for key, label in SAFETY_MODE_LABELS.items()}
 LANGUAGE_CODES = ["a", "b", "d", "e", "f", "h", "i", "j", "p", "z"]
 LANGUAGE_CODE_LABELS = {

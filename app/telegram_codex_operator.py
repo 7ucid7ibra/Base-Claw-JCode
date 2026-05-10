@@ -438,6 +438,12 @@ class CodexBridge:
         self.timeout_seconds = timeout_seconds
         self.safety_mode = safety_mode
 
+    @property
+    def execution_dir(self) -> Path:
+        if self.safety_mode == "code":
+            return PROJECT_ROOT
+        return self.workdir
+
     def _base_command(self, proposal_mode: bool = False) -> list[str]:
         cmd = [
             *resolve_codex_command().args,
@@ -445,13 +451,13 @@ class CodexBridge:
             "--skip-git-repo-check",
             "--json",
             "-C",
-            str(self.workdir),
+            str(self.execution_dir),
         ]
         if proposal_mode:
             cmd.extend(["--sandbox", "read-only", "--ephemeral"])
         elif self.safety_mode == "full":
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        elif self.safety_mode in {"restricted", "safe"}:
+        elif self.safety_mode in {"restricted", "safe", "code"}:
             cmd.extend(["--sandbox", "workspace-write"])
         else:
             cmd.extend(["--sandbox", "workspace-write"])
@@ -635,7 +641,7 @@ class CodexBridge:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                cwd=str(self.workdir),
+                cwd=str(self.execution_dir),
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
@@ -1320,6 +1326,55 @@ class TelegramCodexOperator:
             return self.agent.send(prompt, session_id, status_callback=status_callback)
         return self.agent.send(prompt, session_id)
 
+    def _git_command(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
+
+    def _git_dirty(self) -> bool:
+        result = self._git_command(["status", "--porcelain", "--untracked-files=normal"])
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "git status failed")
+        return bool(result.stdout.strip())
+
+    def _git_commit_all(self, message: str) -> Optional[str]:
+        if not self._git_dirty():
+            return None
+        add_result = self._git_command(["add", "-A"])
+        if add_result.returncode != 0:
+            raise RuntimeError((add_result.stderr or add_result.stdout).strip() or "git add failed")
+        commit_result = self._git_command(["commit", "-m", message])
+        if commit_result.returncode != 0:
+            raise RuntimeError((commit_result.stderr or commit_result.stdout).strip() or "git commit failed")
+        rev_result = self._git_command(["rev-parse", "--short", "HEAD"])
+        if rev_result.returncode == 0:
+            return rev_result.stdout.strip()
+        return None
+
+    def _prepare_code_mode_checkpoint(self) -> Optional[str]:
+        if self.config.safety_mode != "code":
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        commit = self._git_commit_all(f"Code mode pre-run checkpoint {stamp}")
+        if commit:
+            LOGGER.info("Code mode created pre-run checkpoint commit=%s", commit)
+        return commit
+
+    def _commit_code_mode_result(self) -> Optional[str]:
+        if self.config.safety_mode != "code":
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        commit = self._git_commit_all(f"Code mode agent changes {stamp}")
+        if commit:
+            LOGGER.info("Code mode committed agent changes commit=%s", commit)
+        return commit
+
     async def _send_voice_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
             ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, Path(tmp))
@@ -1367,6 +1422,7 @@ class TelegramCodexOperator:
             "Prefer small, understandable steps over building a large framework before it is needed.",
             f"Safety mode: {self.config.safety_mode}.",
             "In safe mode, read and write inside the workspace; ask before touching paths outside it.",
+            "In code mode, you may edit this application's repository as well as the normal workspace. Keep changes small, explain what changed, and rely on the bridge's automatic git checkpoints and commits for revert safety.",
             "In restricted mode, only proceed with the approved request scope and ask again before additional writes.",
             "In full access mode, the user has allowed unrestricted local execution, but still avoid destructive surprises.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
@@ -1522,6 +1578,8 @@ class TelegramCodexOperator:
         task_state.status = "running"
         task_state.latest_status = "starting"
         task_state.updated_at = utc_now()
+        code_mode_checkpoint = None
+        code_mode_commit = None
         try:
             prompt = self._build_background_prompt(
                 task_state.telegram_user,
@@ -1529,12 +1587,21 @@ class TelegramCodexOperator:
                 task_state.transcript,
                 task_state.task_id,
             )
+            code_mode_checkpoint = await asyncio.to_thread(self._prepare_code_mode_checkpoint)
             session_id, reply_text = await asyncio.to_thread(
                 self._send_agent_prompt,
                 prompt,
                 None,
                 status_callback,
             )
+            code_mode_commit = await asyncio.to_thread(self._commit_code_mode_result)
+            if code_mode_checkpoint or code_mode_commit:
+                notes = []
+                if code_mode_checkpoint:
+                    notes.append(f"pre-run checkpoint `{code_mode_checkpoint}`")
+                if code_mode_commit:
+                    notes.append(f"agent changes `{code_mode_commit}`")
+                reply_text = f"{reply_text}\n\nCode mode git safety: committed " + " and ".join(notes) + "."
             task_state.session_id = session_id
             task_state.reply_text = reply_text
             task_state.status = "done"
@@ -1549,7 +1616,12 @@ class TelegramCodexOperator:
                 text=reply_text,
                 transcript=task_state.transcript,
                 session_id=session_id,
-                metadata={"task_id": task_state.task_id, "input_text": task_state.text},
+                metadata={
+                    "task_id": task_state.task_id,
+                    "input_text": task_state.text,
+                    "code_mode_checkpoint": code_mode_checkpoint,
+                    "code_mode_commit": code_mode_commit,
+                },
             )
             completion_text = f"{task_state.task_id} complete.\n\n{reply_text}"
             try:
@@ -1578,12 +1650,18 @@ class TelegramCodexOperator:
                 message_type="background_task",
                 text=task_state.text,
                 transcript=task_state.transcript,
-                metadata={"task_id": task_state.task_id, "error": str(exc)},
+                metadata={
+                    "task_id": task_state.task_id,
+                    "error": str(exc),
+                    "code_mode_checkpoint": code_mode_checkpoint,
+                    "code_mode_commit": code_mode_commit,
+                },
             )
+            checkpoint_note = f" Checkpoint commit: {code_mode_checkpoint}." if code_mode_checkpoint else ""
             await self._send_text_message(
                 context,
                 task_state.chat_id,
-                f"{task_state.task_id} failed: {exc}",
+                f"{task_state.task_id} failed: {exc}{checkpoint_note}",
                 event_type="background_task_failed_notice",
                 metadata={"task_id": task_state.task_id},
             )
@@ -1637,22 +1715,36 @@ class TelegramCodexOperator:
                     label="Still working",
                 )
             )
+            code_mode_checkpoint = None
+            code_mode_commit = None
             try:
                 LOGGER.info("Processing message chat_id=%s user=%s transcript=%s", chat_id, username, bool(transcript))
                 if approved_proposal:
                     prompt = self._build_approved_prompt(username, text, transcript, approved_proposal)
                 else:
                     prompt = self._build_prompt(username, text, transcript)
+                code_mode_checkpoint = await asyncio.to_thread(self._prepare_code_mode_checkpoint)
                 new_session_id, reply_text = await asyncio.to_thread(
                     self._send_agent_prompt,
                     prompt,
                     session_id,
                     status_callback,
                 )
+                code_mode_commit = await asyncio.to_thread(self._commit_code_mode_result)
             except Exception as exc:
                 LOGGER.exception("Operator request failed chat_id=%s", chat_id)
                 reply_text = f"Operator error: {exc}"
+                if code_mode_checkpoint:
+                    reply_text = f"{reply_text}\n\nCode mode git safety: pre-run checkpoint `{code_mode_checkpoint}` was created before the error."
                 new_session_id = session_id or ""
+
+            if code_mode_checkpoint or code_mode_commit:
+                notes = []
+                if code_mode_checkpoint:
+                    notes.append(f"pre-run checkpoint `{code_mode_checkpoint}`")
+                if code_mode_commit:
+                    notes.append(f"agent changes `{code_mode_commit}`")
+                reply_text = f"{reply_text}\n\nCode mode git safety: committed " + " and ".join(notes) + "."
 
             if new_session_id:
                 self.state.set_session_id(chat_id, new_session_id)
@@ -1687,6 +1779,8 @@ class TelegramCodexOperator:
                     "approved_proposal": approved_proposal,
                     "provider": self.config.agent_provider,
                     "workdir": str(self.config.workdir),
+                    "code_mode_checkpoint": code_mode_checkpoint,
+                    "code_mode_commit": code_mode_commit,
                 },
             )
 
@@ -2034,7 +2128,7 @@ def load_config() -> OperatorConfig:
     local_speech_fallback = parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), True)
     speech_urls = build_speech_urls(remote_speech_url, local_speech_fallback)
     safety_mode = os.environ.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip().lower()
-    if safety_mode not in {"restricted", "safe", "full"}:
+    if safety_mode not in {"restricted", "safe", "code", "full"}:
         safety_mode = "restricted" if parse_bool(os.environ.get("TELEGRAM_OPERATOR_SAFE_MODE", ""), False) else "safe"
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
