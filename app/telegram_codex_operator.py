@@ -621,6 +621,8 @@ class CodexBridge:
         cmd: list[str],
         prompt: str,
         status_callback: Optional[Callable[[str], None]] = None,
+        *,
+        require_completion: bool = False,
     ) -> tuple[str, str]:
         process: Optional[subprocess.Popen[str]] = None
         stderr_chunks: list[str] = []
@@ -691,6 +693,7 @@ class CodexBridge:
                 if (
                     candidate_message_seen_at is not None
                     and candidate_final_message
+                    and not require_completion
                     and time.monotonic() - candidate_message_seen_at >= CODEX_FINAL_MESSAGE_GRACE_SECONDS
                     and process.poll() is None
                 ):
@@ -716,6 +719,10 @@ class CodexBridge:
                         )
                         return session_id, last_final_message
                     if candidate_final_message:
+                        if require_completion:
+                            raise RuntimeError(
+                                f"Codex timed out after {self.timeout_seconds} seconds before completing the worker task"
+                            )
                         LOGGER.warning(
                             "Codex timed out after %ss, but a candidate agent message was recovered pid=%s",
                             self.timeout_seconds,
@@ -766,6 +773,8 @@ class CodexBridge:
                         candidate_final_message = agent_message
                         candidate_message_seen_at = time.monotonic()
                 if completed:
+                    if not last_final_message and last_agent_message:
+                        last_final_message = last_agent_message
                     completion_seen = True
 
         except BrokenPipeError as exc:
@@ -779,6 +788,8 @@ class CodexBridge:
         if return_code != 0 and not last_agent_message:
             detail = "".join(stderr_chunks).strip()
             raise RuntimeError(friendly_codex_error(detail, return_code))
+        if require_completion and not last_final_message:
+            raise RuntimeError("Codex ended before emitting a completed final answer for the worker task")
         if not last_agent_message:
             raise RuntimeError("Codex returned no final agent message")
         return session_id, last_final_message or last_agent_message
@@ -788,12 +799,14 @@ class CodexBridge:
         prompt: str,
         session_id: Optional[str],
         status_callback: Optional[Callable[[str], None]] = None,
+        *,
+        require_completion: bool = False,
     ) -> tuple[str, str]:
         if session_id:
             cmd = self._base_command() + ["resume", session_id, "-"]
         else:
             cmd = self._base_command() + ["-"]
-        return self._run(cmd, prompt, status_callback=status_callback)
+        return self._run(cmd, prompt, status_callback=status_callback, require_completion=require_completion)
 
     def propose(self, prompt: str) -> str:
         cmd = self._base_command(proposal_mode=True) + ["-"]
@@ -1321,9 +1334,18 @@ class TelegramCodexOperator:
         prompt: str,
         session_id: Optional[str],
         status_callback: Optional[Callable[[str], None]] = None,
+        *,
+        require_completion: bool = False,
     ) -> tuple[str, str]:
         if isinstance(self.agent, CodexBridge):
-            return self.agent.send(prompt, session_id, status_callback=status_callback)
+            return self.agent.send(
+                prompt,
+                session_id,
+                status_callback=status_callback,
+                require_completion=require_completion,
+            )
+        if require_completion:
+            LOGGER.warning("Provider %s does not expose completion events; worker completion is best-effort", self.config.agent_provider)
         return self.agent.send(prompt, session_id)
 
     def _git_command(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1456,8 +1478,16 @@ class TelegramCodexOperator:
         prefixes = (
             "background:",
             "bg:",
+            "delegate:",
+            "worker:",
+            "subagent:",
             "run in background:",
             "start background task:",
+            "start worker:",
+            "spawn worker:",
+            "spawn a worker:",
+            "spawn subagent:",
+            "spawn a subagent:",
         )
         for prefix in prefixes:
             if lowered.startswith(prefix):
@@ -1548,7 +1578,7 @@ class TelegramCodexOperator:
         await self._send_text_message(
             context,
             chat_id,
-            f"Started background task {task_id}. I’ll send small progress updates and tell you when it’s done.",
+            f"Started background task {task_id}. I will send small progress updates and tell you when it is done.",
             event_type="background_task_started",
             metadata={"task_id": task_id},
         )
@@ -1593,6 +1623,7 @@ class TelegramCodexOperator:
                 prompt,
                 None,
                 status_callback,
+                require_completion=True,
             )
             code_mode_commit = await asyncio.to_thread(self._commit_code_mode_result)
             if code_mode_checkpoint or code_mode_commit:
@@ -2012,6 +2043,13 @@ class TelegramCodexOperator:
                 f"Voice note failed before it reached Codex: {exc}",
                 event_type="voice_transcription_failed",
             )
+            return
+        background_text = self._extract_background_text(transcript)
+        if background_text is not None:
+            await self._stop_keepalive(keepalive)
+            user = update.effective_user
+            username = user.username or user.full_name or str(user.id)
+            await self._start_background_task(context, chat_id, username, background_text, transcript=transcript)
             return
         await self._process_user_message(update, context, transcript, transcript=transcript, keepalive=keepalive)
 

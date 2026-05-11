@@ -135,11 +135,11 @@ For a quick local check:
 - `/tasks` lists recent background tasks.
 - `/task <task_id>` shows one background task's latest status and result.
 
-You can also start a background task with a normal text message that begins with `background:`, `bg:`, `run in background:`, or `start background task:`.
+You can also start a background task with a text message or voice note that begins with `background:`, `bg:`, `delegate:`, `worker:`, `subagent:`, `run in background:`, `start background task:`, `start worker:`, `spawn worker:`, or `spawn subagent:`.
 
 Normal text and voice requests still run as foreground turns. Foreground turns keep the Telegram typing or recording indicator active until the final reply has been sent. While Codex is running, the bridge sends small status updates every couple of minutes based on streamed Codex events, such as command execution, SSH work, or final reply preparation.
 
-Background tasks run in separate Codex sessions and do not block the normal chat. The bot sends a short acknowledgement immediately, occasional progress updates, and a completion notification when the task finishes. The first implementation keeps background task state in memory; restarting the operator clears the `/tasks` view, though completed messages remain in the SQLite journal.
+Background tasks run in separate Codex sessions and do not block the normal chat. The bot sends a short acknowledgement immediately, occasional progress updates, and a completion notification when the task finishes. For Codex workers, the bridge requires a real completed turn before marking the task done; a generic "I will do that" agent message is not treated as completion. The first implementation keeps background task state in memory; restarting the operator clears the `/tasks` view, though completed messages remain in the SQLite journal.
 
 Background tasks are disabled in `restricted` mode for the first implementation so they cannot bypass approval cards. Use `safe` or `full` mode for detached work, or send the request normally to get an approval card.
 
