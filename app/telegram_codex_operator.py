@@ -628,11 +628,9 @@ class CodexBridge:
         stderr_chunks: list[str] = []
         last_agent_message = ""
         last_final_message = ""
-        candidate_final_message = ""
         session_id = ""
         completion_seen = False
         final_message_seen_at: Optional[float] = None
-        candidate_message_seen_at: Optional[float] = None
         stdout_closed = False
         stderr_closed = False
 
@@ -690,21 +688,6 @@ class CodexBridge:
                     terminate_process_tree(process)
                     return session_id, last_final_message
 
-                if (
-                    candidate_message_seen_at is not None
-                    and candidate_final_message
-                    and not require_completion
-                    and time.monotonic() - candidate_message_seen_at >= CODEX_FINAL_MESSAGE_GRACE_SECONDS
-                    and process.poll() is None
-                ):
-                    LOGGER.warning(
-                        "Codex produced an agent message but did not exit after %.1fs; recovering candidate reply pid=%s",
-                        CODEX_FINAL_MESSAGE_GRACE_SECONDS,
-                        process.pid,
-                    )
-                    terminate_process_tree(process)
-                    return session_id, candidate_final_message
-
                 if process.poll() is not None and stdout_closed and stderr_closed:
                     break
 
@@ -718,17 +701,6 @@ class CodexBridge:
                             process.pid,
                         )
                         return session_id, last_final_message
-                    if candidate_final_message:
-                        if require_completion:
-                            raise RuntimeError(
-                                f"Codex timed out after {self.timeout_seconds} seconds before completing the worker task"
-                            )
-                        LOGGER.warning(
-                            "Codex timed out after %ss, but a candidate agent message was recovered pid=%s",
-                            self.timeout_seconds,
-                            process.pid,
-                        )
-                        return session_id, candidate_final_message
                     raise RuntimeError(f"Codex timed out after {self.timeout_seconds} seconds")
 
                 try:
@@ -751,9 +723,6 @@ class CodexBridge:
                 raw_line = line.strip()
                 if not raw_line:
                     continue
-                if self._event_indicates_more_work(raw_line):
-                    candidate_final_message = ""
-                    candidate_message_seen_at = None
                 if status_callback:
                     status = self._status_from_codex_event(raw_line)
                     if status:
@@ -769,9 +738,6 @@ class CodexBridge:
                     if final_answer:
                         last_final_message = agent_message
                         final_message_seen_at = time.monotonic()
-                    else:
-                        candidate_final_message = agent_message
-                        candidate_message_seen_at = time.monotonic()
                 if completed:
                     if not last_final_message and last_agent_message:
                         last_final_message = last_agent_message
@@ -1447,6 +1413,8 @@ class TelegramCodexOperator:
             "In code mode, you may edit this application's repository as well as the normal workspace. Keep changes small, explain what changed, and rely on the bridge's automatic git checkpoints and commits for revert safety.",
             "In restricted mode, only proceed with the approved request scope and ask again before additional writes.",
             "In full access mode, the user has allowed unrestricted local execution, but still avoid destructive surprises.",
+            "Do not reply that you will do work later unless you have actually started a tracked background task with a task id.",
+            "For normal foreground requests, either do the requested work in this turn and report the result, or ask the user to start a background task with `delegate:`.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             f"Telegram sender: {telegram_user}",
         ]
