@@ -1,6 +1,8 @@
-# TTS Server
+# BaseClaw
 
-This project contains a local Kokoro-82M HTTP TTS server for fast preset-voice speech generation. It uses `hexgrad/Kokoro-82M`, serves WAV audio at 24000 Hz, and includes a helper for converting generated speech into a Telegram voice note.
+BaseClaw is a minimal local-agent foundation for private-machine workflows. It gives you a Telegram interface, speech in and out, a persisted Codex session, safety modes, and a small local settings UI without trying to become a full agent platform.
+
+It also contains a local Kokoro-82M HTTP TTS server for fast preset-voice speech generation. The server uses `hexgrad/Kokoro-82M`, serves WAV audio at 24000 Hz, and includes a helper for converting generated speech into a Telegram voice note.
 
 Kokoro is intentionally isolated in its own Python 3.11 environment at `.venv-kokoro`; do not mix this setup into a Tortoise environment.
 
@@ -8,7 +10,7 @@ German Kokoro support is available as an optional local add-on when compatible c
 
 ## Project Status
 
-This is an alpha local-agent foundation for tinkering, learning, and private-machine workflows. It is intentionally lightweight: Telegram is the remote interface, Kokoro and Whisper provide speech, Codex handles local coding actions, and the app folder contains the default workspace and message journal.
+This is an alpha foundation for tinkering, learning, and private-machine workflows. It is intentionally lightweight: Telegram is the remote interface, Kokoro and Whisper provide speech, Codex handles local coding actions, and the app folder contains the default workspace and message journal.
 
 Before publishing or sharing it, read `docs/PUBLISHING.md`. In particular, do not publish a real `.env.telegram-operator`, logs, SQLite databases, generated audio, virtual environments, or downloaded model folders.
 
@@ -139,9 +141,9 @@ You can also set `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `KOKORO_SERVER_UR
 
 See `docs/KOKORO_REMOTE_USAGE.md` for complete setup, API, and manual conversion examples.
 
-## Telegram Coding Agent Operator
+## BaseClaw Telegram Operator
 
-This repo also includes a Telegram-controlled coding-agent operator bridge:
+BaseClaw includes a Telegram-controlled coding-agent operator bridge:
 
 - Telegram text and voice notes in
 - Whisper transcription for incoming voice

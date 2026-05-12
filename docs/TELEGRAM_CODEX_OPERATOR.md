@@ -1,6 +1,6 @@
-# Telegram Coding Agent Operator
+# BaseClaw Telegram Operator
 
-This service turns a Telegram bot into a local coding-agent operator on this machine.
+BaseClaw turns a Telegram bot into a local coding-agent operator on this machine.
 
 It supports:
 

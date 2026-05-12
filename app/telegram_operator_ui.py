@@ -282,7 +282,7 @@ def root_operator_processes() -> list[dict]:
 class OperatorUi(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Telegram Coding Agent")
+        self.title("BaseClaw")
         self.geometry("690x760+24+24")
         self.minsize(560, 540)
         self.values = read_env(ENV_PATH)
@@ -306,11 +306,11 @@ class OperatorUi(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=22, pady=(22, 10))
         header.grid_columnconfigure(0, weight=1)
 
-        title = ctk.CTkLabel(header, text="Telegram Coding Agent", font=ctk.CTkFont(size=24, weight="bold"))
+        title = ctk.CTkLabel(header, text="BaseClaw", font=ctk.CTkFont(size=24, weight="bold"))
         title.grid(row=0, column=0, sticky="w")
         subtitle = ctk.CTkLabel(
             header,
-            text="Local voice bridge for a Codex session with Telegram, speech, and safe controls.",
+            text="Minimal local agent bridge for Telegram, speech, Codex, and safe controls.",
             text_color="#A8B3BD",
             font=ctk.CTkFont(size=13),
             wraplength=500,

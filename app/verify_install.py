@@ -51,7 +51,7 @@ def fail(message: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Verify the local TTS Server install.")
+    parser = argparse.ArgumentParser(description="Verify the local BaseClaw install.")
     parser.add_argument("--mode", choices=["full", "client", "host"], default="full")
     return parser.parse_args()
 

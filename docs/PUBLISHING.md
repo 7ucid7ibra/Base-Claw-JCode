@@ -6,7 +6,7 @@ This project is ready to share as an alpha learning foundation after the local-s
 
 - Rotate any Telegram bot token that was ever stored in `.env.telegram-operator`.
 - Keep `.env.telegram-operator` local only. Commit `.env.telegram-operator.example`, never the real file.
-- Publish from a clean repository rooted at this `tts-server` folder. Do not publish from a parent user-profile repository.
+- Publish from a clean repository rooted at the BaseClaw project folder. Do not publish from a parent user-profile repository.
 - Review `git status --short` and make sure only project files are present.
 - Remove generated files before release: logs, SQLite databases, voice test WAVs, screenshots, caches, virtual environments, and downloaded model folders.
 - Run `python app/verify_install.py`.

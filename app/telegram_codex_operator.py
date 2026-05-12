@@ -1570,10 +1570,10 @@ class TelegramCodexOperator:
         await self._send_text_message(
             context,
             update.effective_chat.id,
-            "Telegram Codex operator is online. Send text or voice notes.",
+            "BaseClaw is online. Send text or voice notes.",
             event_type="command_start_reply",
         )
-        await self._send_voice_reply(context, update.effective_chat.id, "Telegram Codex operator is online.")
+        await self._send_voice_reply(context, update.effective_chat.id, "BaseClaw is online.")
 
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -1849,7 +1849,7 @@ async def main() -> None:
                 await application.bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        "Telegram Codex operator is online.\n"
+                        "BaseClaw is online.\n"
                         f"Voice: {config.kokoro_voice}\n"
                         f"Safety: {config.safety_mode}\n"
                         f"Speech hosts: {', '.join(config.kokoro_urls) or 'none'}"
@@ -1869,5 +1869,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception:
-        LOGGER.exception("Telegram Codex operator crashed")
+        LOGGER.exception("BaseClaw Telegram operator crashed")
         raise
