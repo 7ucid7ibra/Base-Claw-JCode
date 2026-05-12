@@ -148,7 +148,6 @@ This repo also includes a Telegram-controlled coding-agent operator bridge:
 - Codex CLI operation with a simple local settings UI
 - Persistent Codex CLI session resume per Telegram chat when Codex is selected
 - Compact live status updates during long foreground tasks
-- Explicit background Codex tasks with `/bg`, `/tasks`, and `/task`
 - Kokoro voice replies with selectable voice
 - A small Windows settings UI
 - Full local permissions through the selected local agent
@@ -202,9 +201,7 @@ The older `TELEGRAM_OPERATOR_SAFE_MODE` flag is kept only for compatibility. New
 
 The operator also keeps an automatic SQLite message journal at `telegram_operator_messages.sqlite3` in the project folder. The `telegram_messages` table records incoming text, incoming voice metadata, transcripts, callbacks, outgoing text and voice replies, safe-mode approval events, and completed agent-turn metadata.
 
-Foreground requests keep the Telegram typing or recording indicator active until the final reply is delivered. During longer Codex runs, the bridge sends small status updates every couple of minutes, based on streamed Codex events.
-
-For detached work, use `/bg your task` or start a text message with `background:`. Background tasks run in separate Codex sessions, send occasional progress updates, and notify the chat when they finish. Use `/tasks` to list recent background work and `/task bg-1` to inspect one task.
+Requests run through one resumed Codex session per Telegram chat. The Telegram typing or recording indicator stays active until the final reply is delivered. During longer Codex runs, the bridge sends small status updates every couple of minutes, based on streamed Codex events.
 
 Voice selection uses Kokoro language codes: `a` is American English, `b` is British English, and `d` is the optional local German Kokoro pipeline. The UI auto-updates the code for common voice prefixes like `af_`, `am_`, `bf_`, `bm_`, and `dm_`.
 

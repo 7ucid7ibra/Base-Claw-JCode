@@ -13,6 +13,8 @@ telegram_operator_*screenshot*.png
 telegram_operator_ui_window*.png
 agent_workspace/agent/
 agent_workspace/work/
+agent_workspace/*
+!agent_workspace/AGENT_HOME.md
 bf_alice_test.wav
 benchmark_runs/
 timed_kokoro_memory_note/

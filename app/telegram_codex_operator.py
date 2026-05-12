@@ -50,7 +50,7 @@ SPEECH_REQUEST_TIMEOUT = (SPEECH_CONNECT_TIMEOUT_SECONDS, SPEECH_READ_TIMEOUT_SE
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 8.0
 STATUS_UPDATE_INITIAL_DELAY_SECONDS = 120
 STATUS_UPDATE_INTERVAL_SECONDS = 120
-MAX_BACKGROUND_TASKS_PER_CHAT = 3
+STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
 
 
 def utc_now() -> str:
@@ -240,30 +240,15 @@ class PendingApproval:
     created_at: str
 
 
-@dataclass
-class BackgroundTaskState:
-    task_id: str
-    chat_id: int
-    telegram_user: str
-    text: str
-    transcript: Optional[str]
-    status: str
-    latest_status: str
-    created_at: str
-    updated_at: str
-    session_id: str = ""
-    reply_text: str = ""
-    error: str = ""
-    task: Optional[asyncio.Task] = None
-
-
 class StateStore:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._data = {"sessions": {}}
         if self.path.exists():
-            self._data = json.loads(self.path.read_text(encoding="utf-8"))
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            self._data = {"sessions": loaded.get("sessions", {})}
+        self._data.setdefault("sessions", {})
 
     def save(self) -> None:
         self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
@@ -621,8 +606,6 @@ class CodexBridge:
         cmd: list[str],
         prompt: str,
         status_callback: Optional[Callable[[str], None]] = None,
-        *,
-        require_completion: bool = False,
     ) -> tuple[str, str]:
         process: Optional[subprocess.Popen[str]] = None
         stderr_chunks: list[str] = []
@@ -754,8 +737,6 @@ class CodexBridge:
         if return_code != 0 and not last_agent_message:
             detail = "".join(stderr_chunks).strip()
             raise RuntimeError(friendly_codex_error(detail, return_code))
-        if require_completion and not last_final_message:
-            raise RuntimeError("Codex ended before emitting a completed final answer for the worker task")
         if not last_agent_message:
             raise RuntimeError("Codex returned no final agent message")
         return session_id, last_final_message or last_agent_message
@@ -765,14 +746,12 @@ class CodexBridge:
         prompt: str,
         session_id: Optional[str],
         status_callback: Optional[Callable[[str], None]] = None,
-        *,
-        require_completion: bool = False,
     ) -> tuple[str, str]:
         if session_id:
             cmd = self._base_command() + ["resume", session_id, "-"]
         else:
             cmd = self._base_command() + ["-"]
-        return self._run(cmd, prompt, status_callback=status_callback, require_completion=require_completion)
+        return self._run(cmd, prompt, status_callback=status_callback)
 
     def propose(self, prompt: str) -> str:
         cmd = self._base_command(proposal_mode=True) + ["-"]
@@ -1011,8 +990,6 @@ class TelegramCodexOperator:
         self.voice = KokoroVoiceReply(config.kokoro_urls, config.kokoro_voice, config.kokoro_lang_code)
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
-        self.background_tasks: Dict[str, BackgroundTaskState] = {}
-        self.background_task_counter = 0
 
     def _lock_for(self, chat_id: int) -> asyncio.Lock:
         lock = self.chat_locks.get(chat_id)
@@ -1259,12 +1236,14 @@ class TelegramCodexOperator:
         status_queue: "asyncio.Queue[str]",
         *,
         label: str = "Still working",
-        task_id: Optional[str] = None,
         initial_delay_seconds: int = STATUS_UPDATE_INITIAL_DELAY_SECONDS,
         interval_seconds: int = STATUS_UPDATE_INTERVAL_SECONDS,
+        send_on_status_change: bool = False,
+        status_change_min_interval_seconds: int = STATUS_CHANGE_MIN_INTERVAL_SECONDS,
     ) -> None:
         latest_status = "starting"
         last_sent = ""
+        last_sent_at = 0.0
         next_send_at = time.monotonic() + initial_delay_seconds
         while True:
             timeout = max(0.1, next_send_at - time.monotonic())
@@ -1272,21 +1251,34 @@ class TelegramCodexOperator:
                 status = await asyncio.wait_for(status_queue.get(), timeout=timeout)
                 if status:
                     latest_status = status
+                    if send_on_status_change:
+                        message = f"{label}: {latest_status}."
+                        now = time.monotonic()
+                        if message != last_sent and now - last_sent_at >= status_change_min_interval_seconds:
+                            await self._send_text_message(
+                                context,
+                                chat_id,
+                                message,
+                                event_type="status_update",
+                                metadata={"latest_status": latest_status},
+                            )
+                            last_sent = message
+                            last_sent_at = now
                 continue
             except asyncio.TimeoutError:
                 pass
 
-            task_prefix = f" on {task_id}" if task_id else ""
-            message = f"{label}{task_prefix}: {latest_status}."
+            message = f"{label}: {latest_status}."
             if message != last_sent:
                 await self._send_text_message(
                     context,
                     chat_id,
                     message,
                     event_type="status_update",
-                    metadata={"task_id": task_id, "latest_status": latest_status},
+                    metadata={"latest_status": latest_status},
                 )
                 last_sent = message
+                last_sent_at = time.monotonic()
             next_send_at = time.monotonic() + interval_seconds
 
     def _make_status_callback(self, loop: asyncio.AbstractEventLoop, status_queue: "asyncio.Queue[str]"):
@@ -1300,18 +1292,13 @@ class TelegramCodexOperator:
         prompt: str,
         session_id: Optional[str],
         status_callback: Optional[Callable[[str], None]] = None,
-        *,
-        require_completion: bool = False,
     ) -> tuple[str, str]:
         if isinstance(self.agent, CodexBridge):
             return self.agent.send(
                 prompt,
                 session_id,
                 status_callback=status_callback,
-                require_completion=require_completion,
             )
-        if require_completion:
-            LOGGER.warning("Provider %s does not expose completion events; worker completion is best-effort", self.config.agent_provider)
         return self.agent.send(prompt, session_id)
 
     def _git_command(self, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -1389,6 +1376,28 @@ class TelegramCodexOperator:
                 },
             )
 
+    async def _send_assistant_reply(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        text: str,
+        *,
+        always_send_text: bool = False,
+    ) -> None:
+        try:
+            await self._send_voice_reply(context, chat_id, text)
+        except Exception as exc:
+            LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
+            fallback = (
+                f"{text}\n\n[Voice reply failed: {exc}]"
+                if len(text) <= 3200
+                else f"Voice reply failed: {exc}"
+            )
+            await self._send_text_chunks(context, chat_id, fallback)
+        else:
+            if always_send_text or len(text) > 900:
+                await self._send_text_chunks(context, chat_id, text)
+
     async def _send_text_chunks(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         chunk_size = 3500
         for i in range(0, len(text), chunk_size):
@@ -1413,8 +1422,10 @@ class TelegramCodexOperator:
             "In code mode, you may edit this application's repository as well as the normal workspace. Keep changes small, explain what changed, and rely on the bridge's automatic git checkpoints and commits for revert safety.",
             "In restricted mode, only proceed with the approved request scope and ask again before additional writes.",
             "In full access mode, the user has allowed unrestricted local execution, but still avoid destructive surprises.",
-            "Do not reply that you will do work later unless you have actually started a tracked background task with a task id.",
-            "For normal foreground requests, either do the requested work in this turn and report the result, or ask the user to start a background task with `delegate:`.",
+            "Treat requests as immediate foreground work by default.",
+            "Start doing the work instead of promising future work.",
+            "While working, send short natural progress updates only when there is a real step change.",
+            "Do not create approval loops for small next steps unless there is real risk, missing access, or destructive impact.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             f"Telegram sender: {telegram_user}",
         ]
@@ -1426,250 +1437,6 @@ class TelegramCodexOperator:
         parts.append("User message:")
         parts.append(body.strip())
         return "\n\n".join(parts)
-
-    def _build_background_prompt(self, telegram_user: str, body: str, transcript: Optional[str], task_id: str) -> str:
-        background_context = "\n\n".join(
-            [
-                "BACKGROUND TASK MODE:",
-                f"Task id: {task_id}",
-                "You are a detached worker spawned by the Telegram operator.",
-                "Do the requested task end-to-end in this turn. Do not stop after promising to do the task.",
-                "Use commentary only for meaningful progress, and reserve the final answer for what actually completed, what changed, and anything still blocked.",
-                "Keep the final answer concise enough to work as a Telegram completion notification.",
-            ]
-        )
-        return f"{background_context}\n\n{self._build_prompt(telegram_user, body, transcript)}"
-
-    def _extract_background_text(self, text: str) -> Optional[str]:
-        stripped = (text or "").strip()
-        lowered = stripped.lower()
-        prefixes = (
-            "background:",
-            "bg:",
-            "delegate:",
-            "worker:",
-            "subagent:",
-            "run in background:",
-            "start background task:",
-            "start worker:",
-            "spawn worker:",
-            "spawn a worker:",
-            "spawn subagent:",
-            "spawn a subagent:",
-        )
-        for prefix in prefixes:
-            if lowered.startswith(prefix):
-                return stripped[len(prefix) :].strip()
-        return None
-
-    def _active_background_task_count(self, chat_id: int) -> int:
-        return sum(
-            1
-            for task in self.background_tasks.values()
-            if task.chat_id == chat_id and task.status in {"queued", "running"}
-        )
-
-    def _format_task_summary(self, task: BackgroundTaskState) -> str:
-        summary = (
-            f"{task.task_id}: {task.status}\n"
-            f"Updated: {task.updated_at}\n"
-            f"Latest: {task.latest_status or 'none'}\n"
-            f"Request: {task.text[:500]}"
-        )
-        if task.error:
-            summary += f"\nError: {task.error[:700]}"
-        elif task.reply_text:
-            summary += f"\nResult: {task.reply_text[:900]}"
-        return summary
-
-    async def _start_background_task(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
-        telegram_user: str,
-        text: str,
-        transcript: Optional[str] = None,
-    ) -> None:
-        body = text.strip()
-        if not body:
-            await self._send_text_message(
-                context,
-                chat_id,
-                "Send `/bg your task` or start a message with `background:`.",
-                event_type="background_task_usage",
-                parse_mode=None,
-            )
-            return
-        if self.config.safety_mode == "restricted":
-            await self._send_text_message(
-                context,
-                chat_id,
-                "Background tasks are disabled in restricted mode for now. Send it as a normal request so the approval card can run first.",
-                event_type="background_task_restricted_mode",
-            )
-            return
-        if self._active_background_task_count(chat_id) >= MAX_BACKGROUND_TASKS_PER_CHAT:
-            await self._send_text_message(
-                context,
-                chat_id,
-                f"I already have {MAX_BACKGROUND_TASKS_PER_CHAT} background tasks running for this chat. Let one finish first.",
-                event_type="background_task_limit",
-            )
-            return
-
-        self.background_task_counter += 1
-        task_id = f"bg-{self.background_task_counter}"
-        now = utc_now()
-        task_state = BackgroundTaskState(
-            task_id=task_id,
-            chat_id=chat_id,
-            telegram_user=telegram_user,
-            text=body,
-            transcript=transcript,
-            status="queued",
-            latest_status="queued",
-            created_at=now,
-            updated_at=now,
-        )
-        self.background_tasks[task_id] = task_state
-        self.message_store.append(
-            direction="internal",
-            event_type="background_task_created",
-            chat_id=chat_id,
-            telegram_username=telegram_user,
-            message_type="background_task",
-            text=body,
-            transcript=transcript,
-            metadata={"task_id": task_id},
-        )
-        task_state.task = asyncio.create_task(self._run_background_task(context, task_state))
-        await self._send_text_message(
-            context,
-            chat_id,
-            f"Started background task {task_id}. I will send small progress updates and tell you when it is done.",
-            event_type="background_task_started",
-            metadata={"task_id": task_id},
-        )
-
-    async def _run_background_task(self, context: ContextTypes.DEFAULT_TYPE, task_state: BackgroundTaskState) -> None:
-        loop = asyncio.get_running_loop()
-        status_queue: asyncio.Queue[str] = asyncio.Queue()
-
-        def set_status(status: str) -> None:
-            task_state.latest_status = status
-            task_state.updated_at = utc_now()
-            status_queue.put_nowait(status)
-
-        def status_callback(status: str) -> None:
-            loop.call_soon_threadsafe(set_status, status)
-
-        status_updates = asyncio.create_task(
-            self._status_update_pump(
-                context,
-                task_state.chat_id,
-                status_queue,
-                label="Background task running",
-                task_id=task_state.task_id,
-            )
-        )
-
-        task_state.status = "running"
-        task_state.latest_status = "starting"
-        task_state.updated_at = utc_now()
-        code_mode_checkpoint = None
-        code_mode_commit = None
-        try:
-            prompt = self._build_background_prompt(
-                task_state.telegram_user,
-                task_state.text,
-                task_state.transcript,
-                task_state.task_id,
-            )
-            code_mode_checkpoint = await asyncio.to_thread(self._prepare_code_mode_checkpoint)
-            session_id, reply_text = await asyncio.to_thread(
-                self._send_agent_prompt,
-                prompt,
-                None,
-                status_callback,
-                require_completion=True,
-            )
-            code_mode_commit = await asyncio.to_thread(self._commit_code_mode_result)
-            if code_mode_checkpoint or code_mode_commit:
-                notes = []
-                if code_mode_checkpoint:
-                    notes.append(f"pre-run checkpoint `{code_mode_checkpoint}`")
-                if code_mode_commit:
-                    notes.append(f"agent changes `{code_mode_commit}`")
-                reply_text = f"{reply_text}\n\nCode mode git safety: committed " + " and ".join(notes) + "."
-            task_state.session_id = session_id
-            task_state.reply_text = reply_text
-            task_state.status = "done"
-            task_state.latest_status = "done"
-            task_state.updated_at = utc_now()
-            self.message_store.append(
-                direction="internal",
-                event_type="background_task_completed",
-                chat_id=task_state.chat_id,
-                telegram_username=task_state.telegram_user,
-                message_type="background_task",
-                text=reply_text,
-                transcript=task_state.transcript,
-                session_id=session_id,
-                metadata={
-                    "task_id": task_state.task_id,
-                    "input_text": task_state.text,
-                    "code_mode_checkpoint": code_mode_checkpoint,
-                    "code_mode_commit": code_mode_commit,
-                },
-            )
-            completion_text = f"{task_state.task_id} complete.\n\n{reply_text}"
-            try:
-                await self._send_voice_reply(context, task_state.chat_id, completion_text)
-            except Exception as exc:
-                LOGGER.exception("Background voice reply failed task_id=%s", task_state.task_id)
-                await self._send_text_chunks(
-                    context,
-                    task_state.chat_id,
-                    f"{completion_text}\n\n[Voice reply failed: {exc}]",
-                )
-            else:
-                if len(completion_text) > 900:
-                    await self._send_text_chunks(context, task_state.chat_id, completion_text)
-        except Exception as exc:
-            task_state.status = "failed"
-            task_state.error = str(exc)
-            task_state.latest_status = "failed"
-            task_state.updated_at = utc_now()
-            LOGGER.exception("Background task failed task_id=%s", task_state.task_id)
-            self.message_store.append(
-                direction="internal",
-                event_type="background_task_failed",
-                chat_id=task_state.chat_id,
-                telegram_username=task_state.telegram_user,
-                message_type="background_task",
-                text=task_state.text,
-                transcript=task_state.transcript,
-                metadata={
-                    "task_id": task_state.task_id,
-                    "error": str(exc),
-                    "code_mode_checkpoint": code_mode_checkpoint,
-                    "code_mode_commit": code_mode_commit,
-                },
-            )
-            checkpoint_note = f" Checkpoint commit: {code_mode_checkpoint}." if code_mode_checkpoint else ""
-            await self._send_text_message(
-                context,
-                task_state.chat_id,
-                f"{task_state.task_id} failed: {exc}{checkpoint_note}",
-                event_type="background_task_failed_notice",
-                metadata={"task_id": task_state.task_id},
-            )
-        finally:
-            status_updates.cancel()
-            try:
-                await status_updates
-            except (asyncio.CancelledError, Exception):
-                pass
 
     async def _process_user_message(
         self,
@@ -1784,19 +1551,7 @@ class TelegramCodexOperator:
             )
 
             try:
-                try:
-                    await self._send_voice_reply(context, chat_id, reply_text)
-                except Exception as exc:
-                    LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
-                    fallback = (
-                        f"{reply_text}\n\n[Voice reply failed: {exc}]"
-                        if len(reply_text) <= 3200
-                        else f"Voice reply failed: {exc}"
-                    )
-                    await self._send_text_chunks(context, chat_id, fallback)
-                else:
-                    if len(reply_text) > 900:
-                        await self._send_text_chunks(context, chat_id, reply_text)
+                await self._send_assistant_reply(context, chat_id, reply_text)
             finally:
                 await self._stop_keepalive(keepalive)
                 status_updates.cancel()
@@ -1864,84 +1619,6 @@ class TelegramCodexOperator:
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
 
-    async def background(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        username = user.username or user.full_name or str(user.id)
-        text = " ".join(context.args or []).strip()
-        self._record_incoming_message(
-            update,
-            event_type="command_background",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else text,
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        await self._start_background_task(context, chat_id, username, text)
-
-    async def tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_tasks",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/tasks",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        tasks = [task for task in self.background_tasks.values() if task.chat_id == chat_id]
-        if not tasks:
-            await self._send_text_message(
-                context,
-                chat_id,
-                "No background tasks yet. Start one with `/bg your task`.",
-                event_type="command_tasks_reply",
-                parse_mode=None,
-            )
-            return
-        tasks = sorted(tasks, key=lambda item: item.created_at, reverse=True)[:10]
-        lines = ["Background tasks:"]
-        for task in tasks:
-            lines.append(f"{task.task_id}: {task.status} - {task.latest_status or 'no status'}")
-        await self._send_text_message(
-            context,
-            chat_id,
-            "\n".join(lines),
-            event_type="command_tasks_reply",
-        )
-
-    async def task(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_task",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/task",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        task_id = (context.args[0] if context.args else "").strip()
-        task_state = self.background_tasks.get(task_id)
-        if not task_id or task_state is None or task_state.chat_id != chat_id:
-            await self._send_text_message(
-                context,
-                chat_id,
-                "Use `/task bg-1` to inspect a background task.",
-                event_type="command_task_usage",
-                parse_mode=None,
-            )
-            return
-        await self._send_text_message(
-            context,
-            chat_id,
-            self._format_task_summary(task_state),
-            event_type="command_task_reply",
-            metadata={"task_id": task_id},
-        )
-
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
             return
@@ -1951,16 +1628,6 @@ class TelegramCodexOperator:
             message_type="text",
             text=update.message.text,
         )
-        background_text = self._extract_background_text(update.message.text)
-        if background_text is not None:
-            chat_id = update.effective_chat.id
-            user = update.effective_user
-            username = user.username or user.full_name or str(user.id)
-            if not self._authorized(chat_id):
-                await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-                return
-            await self._start_background_task(context, chat_id, username, background_text)
-            return
         await self._process_user_message(update, context, update.message.text)
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2011,13 +1678,6 @@ class TelegramCodexOperator:
                 f"Voice note failed before it reached Codex: {exc}",
                 event_type="voice_transcription_failed",
             )
-            return
-        background_text = self._extract_background_text(transcript)
-        if background_text is not None:
-            await self._stop_keepalive(keepalive)
-            user = update.effective_user
-            username = user.username or user.full_name or str(user.id)
-            await self._start_background_task(context, chat_id, username, background_text, transcript=transcript)
             return
         await self._process_user_message(update, context, transcript, transcript=transcript, keepalive=keepalive)
 
@@ -2177,10 +1837,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("start", operator.start))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
-    application.add_handler(CommandHandler("bg", operator.background))
-    application.add_handler(CommandHandler("background", operator.background))
-    application.add_handler(CommandHandler("tasks", operator.tasks))
-    application.add_handler(CommandHandler("task", operator.task))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.VOICE, operator.on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, operator.on_text))
