@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import re
 import secrets
 import shutil
 import sqlite3
@@ -51,6 +52,8 @@ CODEX_FINAL_MESSAGE_GRACE_SECONDS = 8.0
 STATUS_UPDATE_INITIAL_DELAY_SECONDS = 120
 STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
+PDF_EXTRACT_MAX_CHARS = 60000
+PHOTO_ALBUM_SETTLE_SECONDS = 1.5
 
 
 def utc_now() -> str:
@@ -82,6 +85,11 @@ def parse_positive_int(raw: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def safe_filename(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+    return cleaned or "document.pdf"
 
 
 def parse_bool(raw: str, default: bool) -> bool:
@@ -990,6 +998,7 @@ class TelegramCodexOperator:
         self.voice = KokoroVoiceReply(config.kokoro_urls, config.kokoro_voice, config.kokoro_lang_code)
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
+        self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
 
     def _lock_for(self, chat_id: int) -> asyncio.Lock:
         lock = self.chat_locks.get(chat_id)
@@ -1619,6 +1628,327 @@ class TelegramCodexOperator:
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
 
+    def _spawn_replacement_operator(self) -> subprocess.Popen:
+        script_path = Path(__file__).resolve()
+        command = [sys.executable, str(script_path)]
+        creationflags = 0
+        if os.name == "nt":
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        return subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=os.name != "nt",
+            creationflags=creationflags,
+        )
+
+    async def _exit_after_restart(self, delay_seconds: float = 1.5) -> None:
+        await asyncio.sleep(delay_seconds)
+        LOGGER.info("Exiting old Telegram operator process after self-restart pid=%s", os.getpid())
+        os._exit(0)
+
+    async def restart_operator(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_restart_operator",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/restart_operator",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        try:
+            replacement = self._spawn_replacement_operator()
+        except Exception as exc:
+            LOGGER.exception("Operator self-restart spawn failed")
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Restart failed before the new operator could start: {exc}",
+                event_type="command_restart_operator_failed",
+            )
+            return
+
+        LOGGER.info(
+            "Operator self-restart requested chat_id=%s old_pid=%s new_pid=%s",
+            chat_id,
+            os.getpid(),
+            replacement.pid,
+        )
+        await self._send_text_message(
+            context,
+            chat_id,
+            "Restarting the Telegram operator now. If everything worked, I should come back online automatically.",
+            event_type="command_restart_operator_reply",
+            metadata={"old_pid": os.getpid(), "new_pid": replacement.pid},
+        )
+        asyncio.create_task(self._exit_after_restart())
+
+    def _extract_pdf_text(self, pdf_path: Path, max_chars: int = PDF_EXTRACT_MAX_CHARS) -> tuple[str, bool]:
+        try:
+            from pypdf import PdfReader
+        except ImportError as exc:
+            raise RuntimeError("pypdf is not installed in the Telegram operator environment") from exc
+
+        reader = PdfReader(str(pdf_path))
+        parts: list[str] = []
+        total_chars = 0
+        truncated = False
+        for page_number, page in enumerate(reader.pages, start=1):
+            page_text = (page.extract_text() or "").strip()
+            page_block = f"--- Page {page_number} ---\n{page_text}"
+            parts.append(page_block)
+            total_chars += len(page_block)
+            if total_chars >= max_chars:
+                truncated = True
+                break
+        text = "\n\n".join(parts)
+        if len(text) > max_chars:
+            text = text[:max_chars]
+            truncated = True
+        if truncated:
+            text += "\n\n[PDF extraction truncated before sending to the agent.]"
+        return text, truncated
+
+    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.message.document:
+            return
+        chat_id = update.effective_chat.id
+        document = update.message.document
+        filename = document.file_name or "document.pdf"
+        mime_type = document.mime_type or ""
+        is_pdf = mime_type.lower() == "application/pdf" or filename.lower().endswith(".pdf")
+        document_metadata = {
+            "document_file_id": document.file_id,
+            "document_file_unique_id": document.file_unique_id,
+            "file_name": filename,
+            "mime_type": mime_type,
+            "file_size": document.file_size,
+            "caption": update.message.caption,
+        }
+        self._record_incoming_message(
+            update,
+            event_type="incoming_document",
+            message_type="document",
+            text=update.message.caption,
+            metadata=document_metadata,
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        if not is_pdf:
+            await self._send_text_message(
+                context,
+                chat_id,
+                "I received a document, but it is not a PDF. For now I only handle PDF documents.",
+                event_type="unsupported_document",
+            )
+            return
+
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+        try:
+            upload_dir = self.config.workdir / "telegram_uploads" / "pdfs"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            saved_name = f"{update.message.message_id}_{safe_filename(filename)}"
+            pdf_path = upload_dir / saved_name
+            telegram_file = await context.bot.get_file(document.file_id)
+            await telegram_file.download_to_drive(custom_path=str(pdf_path))
+            extracted_text, truncated = await asyncio.to_thread(self._extract_pdf_text, pdf_path)
+            extracted_chars = len(extracted_text)
+            document_metadata.update(
+                {
+                    "saved_path": str(pdf_path),
+                    "extracted_chars": extracted_chars,
+                    "truncated": truncated,
+                }
+            )
+            self.message_store.append(
+                direction="in",
+                event_type="pdf_document_saved",
+                chat_id=chat_id,
+                telegram_message_id=update.message.message_id,
+                telegram_user_id=update.effective_user.id if update.effective_user else None,
+                telegram_username=update.effective_user.username if update.effective_user else None,
+                telegram_full_name=update.effective_user.full_name if update.effective_user else None,
+                message_type="pdf",
+                text=update.message.caption,
+                safe_mode=self.config.safe_mode,
+                metadata=document_metadata,
+            )
+        except Exception as exc:
+            LOGGER.exception("PDF document handling failed chat_id=%s", chat_id)
+            await self._stop_keepalive(keepalive)
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"PDF handling failed before it reached Codex: {exc}",
+                event_type="pdf_document_failed",
+            )
+            return
+
+        if extracted_text.strip():
+            body = "\n\n".join(
+                [
+                    update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "PDF attachment received.",
+                    f"Filename: {filename}",
+                    f"Saved locally as: {pdf_path}",
+                    f"Extracted characters: {extracted_chars}",
+                    "Extracted PDF text:",
+                    extracted_text,
+                ]
+            )
+        else:
+            body = "\n\n".join(
+                [
+                    update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "PDF attachment received, but no selectable text could be extracted.",
+                    f"Filename: {filename}",
+                    f"Saved locally as: {pdf_path}",
+                    "This PDF likely needs OCR or vision analysis.",
+                ]
+            )
+        await self._process_user_message(update, context, body, keepalive=keepalive)
+
+    async def _download_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, index: int) -> dict[str, Any]:
+        if not update.message or not update.message.photo:
+            raise RuntimeError("Photo update did not contain a photo")
+        photo = update.message.photo[-1]
+        upload_dir = self.config.workdir / "telegram_uploads" / "images"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        saved_name = f"{update.message.message_id}_{index}_{photo.file_unique_id}.jpg"
+        image_path = upload_dir / safe_filename(saved_name)
+        telegram_file = await context.bot.get_file(photo.file_id)
+        await telegram_file.download_to_drive(custom_path=str(image_path))
+        return {
+            "message_id": update.message.message_id,
+            "file_id": photo.file_id,
+            "file_unique_id": photo.file_unique_id,
+            "width": photo.width,
+            "height": photo.height,
+            "file_size": photo.file_size,
+            "caption": update.message.caption,
+            "saved_path": str(image_path),
+        }
+
+    async def _process_photo_updates(
+        self,
+        updates: list[Update],
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        media_group_id: Optional[str] = None,
+    ) -> None:
+        representative = updates[0]
+        chat_id = representative.effective_chat.id
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+        try:
+            images = []
+            captions = []
+            for index, item in enumerate(updates, start=1):
+                if item.message and item.message.caption:
+                    captions.append(item.message.caption)
+                images.append(await self._download_photo_message(item, context, index))
+
+            caption = "\n".join(dict.fromkeys(captions)).strip()
+            image_lines = [
+                f"{idx}. {image['saved_path']} ({image['width']}x{image['height']})"
+                for idx, image in enumerate(images, start=1)
+            ]
+            metadata = {
+                "media_group_id": media_group_id,
+                "image_count": len(images),
+                "images": images,
+                "caption": caption,
+            }
+            self.message_store.append(
+                direction="in",
+                event_type="photo_images_saved",
+                chat_id=chat_id,
+                telegram_message_id=representative.message.message_id if representative.message else None,
+                telegram_user_id=representative.effective_user.id if representative.effective_user else None,
+                telegram_username=representative.effective_user.username if representative.effective_user else None,
+                telegram_full_name=representative.effective_user.full_name if representative.effective_user else None,
+                message_type="photo",
+                text=caption,
+                safe_mode=self.config.safe_mode,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            LOGGER.exception("Photo handling failed chat_id=%s media_group_id=%s", chat_id, media_group_id)
+            await self._stop_keepalive(keepalive)
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Image handling failed before it reached Codex: {exc}",
+                event_type="photo_handling_failed",
+            )
+            return
+
+        body_parts = [
+            caption or "Please look at these screenshot attachments and respond to them.",
+            f"{'Telegram photo album' if len(images) > 1 else 'Telegram photo'} received.",
+            f"Saved image count: {len(images)}",
+            "Saved locally as:",
+            "\n".join(image_lines),
+        ]
+        await self._process_user_message(representative, context, "\n\n".join(body_parts), keepalive=keepalive)
+
+    async def _flush_photo_album_after_delay(
+        self,
+        key: tuple[int, str],
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        try:
+            await asyncio.sleep(PHOTO_ALBUM_SETTLE_SECONDS)
+            album = self.photo_albums.pop(key, None)
+            if not album:
+                return
+            await self._process_photo_updates(album["updates"], context, media_group_id=key[1])
+        except asyncio.CancelledError:
+            return
+
+    async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.message.photo:
+            return
+        chat_id = update.effective_chat.id
+        photo = update.message.photo[-1]
+        media_group_id = update.message.media_group_id
+        self._record_incoming_message(
+            update,
+            event_type="incoming_photo",
+            message_type="photo",
+            text=update.message.caption,
+            metadata={
+                "media_group_id": media_group_id,
+                "file_id": photo.file_id,
+                "file_unique_id": photo.file_unique_id,
+                "width": photo.width,
+                "height": photo.height,
+                "file_size": photo.file_size,
+                "caption": update.message.caption,
+            },
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+
+        if media_group_id:
+            key = (chat_id, media_group_id)
+            album = self.photo_albums.setdefault(key, {"updates": [], "task": None})
+            album["updates"].append(update)
+            task = album.get("task")
+            if task and not task.done():
+                task.cancel()
+            album["task"] = asyncio.create_task(self._flush_photo_album_after_delay(key, context))
+            return
+
+        await self._process_photo_updates([update], context)
+
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
             return
@@ -1837,7 +2167,11 @@ async def main() -> None:
     application.add_handler(CommandHandler("start", operator.start))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
+    application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
+    application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
+    application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
+    application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))
     application.add_handler(MessageHandler(filters.VOICE, operator.on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, operator.on_text))
     await application.initialize()
