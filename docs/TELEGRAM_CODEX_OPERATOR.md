@@ -70,6 +70,16 @@ Codex settings:
 - `TELEGRAM_OPERATOR_SAFETY_MODE=safe` selects the Codex safety level.
 - `TELEGRAM_OPERATOR_SAFE_MODE` is a legacy compatibility flag. The UI now writes `TELEGRAM_OPERATOR_SAFETY_MODE`.
 - `TELEGRAM_OPERATOR_SQLITE_PATH=telegram_operator_messages.sqlite3` stores incoming messages, outgoing replies, callbacks, transcripts, and agent-turn metadata in SQLite. The UI does not expose this path; it is fixed to the app folder by default.
+- `/history_status` reports local raw-message rows that are eligible for shared history sync, how many have synced, and whether the Raspberry Pi sync target is configured.
+- `/history_sync` manually copies unsynced local raw message rows to the configured Raspberry Pi SQLite history database. Sync is append-only and duplicate-safe by `agent:device:local_id` source keys.
+- History sync configuration:
+  - `TELEGRAM_OPERATOR_HISTORY_AGENT=baseclaw`
+  - `TELEGRAM_OPERATOR_HISTORY_DEVICE=<device-name>`
+  - `TELEGRAM_OPERATOR_HISTORY_REMOTE=ai@100.108.172.7`
+  - `TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH=/media/ai/7A31-E9C8/agent_history/shared_history.sqlite3`
+  - `TELEGRAM_OPERATOR_HISTORY_SSH_KEY=<private-key-path>`
+  - `TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS=<known-hosts-path>`
+  - `TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT=250`
 - `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the single optional remote host for both Kokoro TTS and Whisper transcription. If it is empty or unreachable, the bridge falls back to local `http://127.0.0.1:8766`.
 - `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK=true` controls whether the client tries local `127.0.0.1:8766` when the remote host is empty or unavailable. Set it to `false` for host-only lightweight clients.
 - `TELEGRAM_OPERATOR_STARTUP_NOTICE=true` sends a short Telegram text notice to the allowed chat ids after the operator starts.
