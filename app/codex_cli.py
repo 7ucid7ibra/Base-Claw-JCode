@@ -12,6 +12,22 @@ class CodexCommand:
     display: str
 
 
+def _node_wrapped_command(executable: str) -> CodexCommand:
+    path = Path(executable)
+    try:
+        first_line = path.read_text(encoding="utf-8", errors="ignore").splitlines()[0]
+    except (OSError, IndexError):
+        first_line = ""
+    if path.suffix == ".js" or "node" in first_line:
+        node = shutil.which("node")
+        for candidate in ("/opt/homebrew/bin/node", "/usr/local/bin/node"):
+            if not node and Path(candidate).exists():
+                node = candidate
+        if node:
+            return CodexCommand([node, executable], executable)
+    return CodexCommand([executable], executable)
+
+
 def resolve_codex_command() -> CodexCommand:
     if sys.platform == "win32":
         cmd = shutil.which("codex.cmd")
@@ -48,9 +64,14 @@ def resolve_codex_command() -> CodexCommand:
 
     executable = shutil.which("codex")
     if not executable:
+        for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
+            if Path(candidate).exists():
+                executable = candidate
+                break
+    if not executable:
         raise RuntimeError(
             "Codex CLI was not found on PATH. Install Codex, run `codex login`, "
             "then restart the Telegram operator."
         )
-    return CodexCommand([executable], executable)
+    return _node_wrapped_command(executable)
 
