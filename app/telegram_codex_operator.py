@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -236,6 +237,13 @@ class OperatorConfig:
     codex_model: str
     safety_mode: str
     safe_mode: bool
+    history_agent_name: str
+    history_device_name: str
+    history_remote: str
+    history_remote_db_path: str
+    history_ssh_key_path: Path
+    history_known_hosts_path: Path
+    history_sync_limit: int
 
 
 @dataclass
@@ -325,6 +333,20 @@ class SQLiteMessageStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_telegram_messages_event ON telegram_messages(event_type)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS history_sync_state (
+                    local_message_id INTEGER PRIMARY KEY,
+                    sync_source TEXT,
+                    synced_at TEXT,
+                    sync_error TEXT,
+                    FOREIGN KEY(local_message_id) REFERENCES telegram_messages(id) ON DELETE CASCADE
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_sync_synced_at ON history_sync_state(synced_at)"
+            )
 
     def append(
         self,
@@ -388,6 +410,156 @@ class SQLiteMessageStore:
                 )
         except (OSError, sqlite3.Error):
             LOGGER.exception("Failed to record Telegram message event_type=%s direction=%s", event_type, direction)
+
+    def _eligible_history_where(self) -> str:
+        return """
+            direction IN ('in', 'out')
+            AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+        """
+
+    def history_sync_status(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM telegram_messages WHERE {self._eligible_history_where()}"
+            ).fetchone()[0]
+            synced = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM telegram_messages m
+                JOIN history_sync_state s ON s.local_message_id = m.id
+                WHERE {self._eligible_history_where()} AND s.synced_at IS NOT NULL
+                """
+            ).fetchone()[0]
+            unsynced = connection.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM telegram_messages m
+                LEFT JOIN history_sync_state s ON s.local_message_id = m.id
+                WHERE {self._eligible_history_where()} AND s.synced_at IS NULL
+                """
+            ).fetchone()[0]
+            last_synced = connection.execute(
+                "SELECT MAX(synced_at) FROM history_sync_state WHERE synced_at IS NOT NULL"
+            ).fetchone()[0]
+            last_error = connection.execute(
+                """
+                SELECT sync_error
+                FROM history_sync_state
+                WHERE sync_error IS NOT NULL AND sync_error != ''
+                ORDER BY rowid DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return {
+            "total": int(total),
+            "synced": int(synced),
+            "unsynced": int(unsynced),
+            "last_synced": last_synced,
+            "last_error": last_error[0] if last_error else None,
+        }
+
+    def unsynced_history_rows(self, *, agent: str, device: str, limit: int = 250) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                f"""
+                SELECT
+                    m.id,
+                    m.recorded_at,
+                    m.direction,
+                    m.event_type,
+                    m.chat_id,
+                    m.telegram_message_id,
+                    m.telegram_user_id,
+                    m.telegram_username,
+                    m.telegram_full_name,
+                    m.message_type,
+                    m.text,
+                    m.transcript,
+                    m.session_id,
+                    m.safe_mode,
+                    m.approval_id,
+                    m.metadata_json
+                FROM telegram_messages m
+                LEFT JOIN history_sync_state s ON s.local_message_id = m.id
+                WHERE {self._eligible_history_where()} AND s.synced_at IS NULL
+                ORDER BY m.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        payloads = []
+        for row in rows:
+            role = "user" if row["direction"] == "in" else "assistant"
+            message_text = row["text"] or row["transcript"] or ""
+            metadata = {
+                "local_message_id": row["id"],
+                "event_type": row["event_type"],
+                "direction": row["direction"],
+                "telegram_message_id": row["telegram_message_id"],
+                "telegram_username": row["telegram_username"],
+                "telegram_full_name": row["telegram_full_name"],
+                "safe_mode": row["safe_mode"],
+                "approval_id": row["approval_id"],
+            }
+            if row["metadata_json"]:
+                try:
+                    metadata["local_metadata"] = json.loads(row["metadata_json"])
+                except json.JSONDecodeError:
+                    metadata["local_metadata_raw"] = row["metadata_json"]
+            payloads.append(
+                {
+                    "local_id": row["id"],
+                    "agent": agent,
+                    "device": device,
+                    "conversation_id": row["session_id"] or (str(row["chat_id"]) if row["chat_id"] is not None else None),
+                    "role": role,
+                    "channel": "telegram",
+                    "sender_id": str(row["telegram_user_id"] or row["chat_id"] or ""),
+                    "transport": row["message_type"] or row["event_type"],
+                    "source": f"{agent}:{device}:{row['id']}",
+                    "message_text": message_text,
+                    "transcript_text": row["transcript"],
+                    "raw_payload_json": row["metadata_json"],
+                    "metadata_json": json.dumps(metadata, ensure_ascii=True, default=str),
+                    "message_ts": row["recorded_at"],
+                    "recorded_at": row["recorded_at"],
+                    "synced_at": utc_now(),
+                    "sync_source": "telegram_operator_history_sync",
+                }
+            )
+        return payloads
+
+    def mark_history_synced(self, local_ids: list[int], *, sync_source: str) -> None:
+        if not local_ids:
+            return
+        synced_at = utc_now()
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO history_sync_state (local_message_id, sync_source, synced_at, sync_error)
+                VALUES (?, ?, ?, NULL)
+                ON CONFLICT(local_message_id) DO UPDATE SET
+                    sync_source=excluded.sync_source,
+                    synced_at=excluded.synced_at,
+                    sync_error=NULL
+                """,
+                [(local_id, sync_source, synced_at) for local_id in local_ids],
+            )
+
+    def mark_history_sync_error(self, local_ids: list[int], error: str) -> None:
+        if not local_ids:
+            return
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO history_sync_state (local_message_id, sync_source, synced_at, sync_error)
+                VALUES (?, NULL, NULL, ?)
+                ON CONFLICT(local_message_id) DO UPDATE SET
+                    sync_error=excluded.sync_error
+                """,
+                [(local_id, error[:1000]) for local_id in local_ids],
+            )
 
 
 class RemoteFirstWhisperTranscriber:
@@ -1359,6 +1531,196 @@ class TelegramCodexOperator:
             LOGGER.info("Code mode committed agent changes commit=%s", commit)
         return commit
 
+    def _history_sync_available(self) -> tuple[bool, str]:
+        missing = []
+        if not self.config.history_remote:
+            missing.append("TELEGRAM_OPERATOR_HISTORY_REMOTE")
+        if not self.config.history_remote_db_path:
+            missing.append("TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH")
+        if not self.config.history_ssh_key_path.exists():
+            missing.append(f"SSH key missing: {self.config.history_ssh_key_path}")
+        if not self.config.history_known_hosts_path.exists():
+            missing.append(f"known_hosts missing: {self.config.history_known_hosts_path}")
+        if missing:
+            return False, "; ".join(missing)
+        return True, "configured"
+
+    def _history_ssh_base_command(self) -> list[str]:
+        return [
+            "ssh",
+            "-i",
+            str(self.config.history_ssh_key_path),
+            "-o",
+            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=10",
+            self.config.history_remote,
+        ]
+
+    def _history_scp_base_command(self) -> list[str]:
+        return [
+            "scp",
+            "-i",
+            str(self.config.history_ssh_key_path),
+            "-o",
+            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+        ]
+
+    def _sync_history_to_pi(self) -> dict[str, Any]:
+        available, detail = self._history_sync_available()
+        if not available:
+            raise RuntimeError(detail)
+
+        rows = self.message_store.unsynced_history_rows(
+            agent=self.config.history_agent_name,
+            device=self.config.history_device_name,
+            limit=self.config.history_sync_limit,
+        )
+        if not rows:
+            return {"selected": 0, "inserted": 0, "skipped": 0, "remote_db": self.config.history_remote_db_path}
+
+        local_ids = [int(row["local_id"]) for row in rows]
+        transfer_id = uuid.uuid4().hex
+        remote_dir = f"/tmp/baseclaw-history-sync-{transfer_id}"
+        remote_rows = f"{remote_dir}/rows.ndjson"
+        remote_script = f"{remote_dir}/sync_history.py"
+
+        script = r'''
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+rows_path = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+db_path.parent.mkdir(parents=True, exist_ok=True)
+
+schema = """
+PRAGMA journal_mode = WAL;
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent TEXT NOT NULL,
+    device TEXT,
+    conversation_id TEXT,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+    channel TEXT NOT NULL DEFAULT 'telegram',
+    sender_id TEXT,
+    transport TEXT,
+    source TEXT,
+    message_text TEXT NOT NULL,
+    transcript_text TEXT,
+    raw_payload_json TEXT,
+    metadata_json TEXT,
+    message_ts TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    synced_at TEXT NOT NULL,
+    sync_source TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages (agent);
+CREATE INDEX IF NOT EXISTS idx_messages_device ON messages (device);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_message_ts ON messages (message_ts);
+CREATE INDEX IF NOT EXISTS idx_messages_role ON messages (role);
+CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_unique ON messages (source);
+"""
+
+with rows_path.open("r", encoding="utf-8") as handle:
+    rows = [json.loads(line) for line in handle if line.strip()]
+
+inserted = 0
+with sqlite3.connect(db_path) as connection:
+    connection.executescript(schema)
+    for row in rows:
+        before = connection.total_changes
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO messages (
+                agent, device, conversation_id, role, channel, sender_id, transport, source,
+                message_text, transcript_text, raw_payload_json, metadata_json,
+                message_ts, recorded_at, synced_at, sync_source
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row.get("agent"),
+                row.get("device"),
+                row.get("conversation_id"),
+                row.get("role"),
+                row.get("channel") or "telegram",
+                row.get("sender_id"),
+                row.get("transport"),
+                row.get("source"),
+                row.get("message_text") or "",
+                row.get("transcript_text"),
+                row.get("raw_payload_json"),
+                row.get("metadata_json"),
+                row.get("message_ts"),
+                row.get("recorded_at"),
+                row.get("synced_at"),
+                row.get("sync_source"),
+            ),
+        )
+        if connection.total_changes > before:
+            inserted += 1
+
+print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(rows) - inserted, "remote_db": str(db_path)}))
+'''
+
+        with tempfile.TemporaryDirectory(prefix="baseclaw-history-sync-") as tmp:
+            tmp_dir = Path(tmp)
+            rows_path = tmp_dir / "rows.ndjson"
+            script_path = tmp_dir / "sync_history.py"
+            with rows_path.open("w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=True, default=str) + "\n")
+            script_path.write_text(script, encoding="utf-8")
+
+            mkdir_result = subprocess.run(
+                [*self._history_ssh_base_command(), f"mkdir -p {remote_dir}"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **hidden_subprocess_kwargs(),
+            )
+            if mkdir_result.returncode != 0:
+                raise RuntimeError((mkdir_result.stderr or mkdir_result.stdout).strip() or "failed to create remote temp dir")
+
+            scp_result = subprocess.run(
+                [*self._history_scp_base_command(), str(rows_path), str(script_path), f"{self.config.history_remote}:{remote_dir}/"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **hidden_subprocess_kwargs(),
+            )
+            if scp_result.returncode != 0:
+                raise RuntimeError((scp_result.stderr or scp_result.stdout).strip() or "failed to copy history sync files")
+
+            remote_command = (
+                f"python3 {remote_script} {remote_rows} {self.config.history_remote_db_path}; "
+                f"status=$?; rm -rf {remote_dir}; exit $status"
+            )
+            sync_result = subprocess.run(
+                [*self._history_ssh_base_command(), remote_command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                **hidden_subprocess_kwargs(),
+            )
+            if sync_result.returncode != 0:
+                raise RuntimeError((sync_result.stderr or sync_result.stdout).strip() or "remote history sync failed")
+
+        summary = json.loads((sync_result.stdout or "{}").strip().splitlines()[-1])
+        self.message_store.mark_history_synced(local_ids, sync_source="pi_shared_history")
+        return summary
+
     async def _send_voice_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
             ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, Path(tmp))
@@ -1627,6 +1989,66 @@ class TelegramCodexOperator:
         )
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
+
+    async def history_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_history_status",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/history_status",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+
+        status = await asyncio.to_thread(self.message_store.history_sync_status)
+        available, detail = self._history_sync_available()
+        text = (
+            "History sync status\n"
+            f"Agent: {self.config.history_agent_name}\n"
+            f"Device: {self.config.history_device_name}\n"
+            f"Remote: {self.config.history_remote}\n"
+            f"Remote DB: {self.config.history_remote_db_path}\n"
+            f"Configured: {'yes' if available else 'no'} ({detail})\n\n"
+            f"Eligible local rows: {status['total']}\n"
+            f"Synced: {status['synced']}\n"
+            f"Unsynced: {status['unsynced']}\n"
+            f"Last synced: {status['last_synced'] or 'never'}\n"
+            f"Last error: {status['last_error'] or 'none'}"
+        )
+        await self._send_text_message(context, chat_id, text, event_type="command_history_status_reply")
+
+    async def history_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_history_sync",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/history_sync",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+        try:
+            result = await asyncio.to_thread(self._sync_history_to_pi)
+            text = (
+                "History sync complete\n"
+                f"Selected: {result.get('selected', 0)}\n"
+                f"Inserted: {result.get('inserted', 0)}\n"
+                f"Skipped duplicates: {result.get('skipped', 0)}\n"
+                f"Remote DB: {result.get('remote_db', self.config.history_remote_db_path)}"
+            )
+            event_type = "command_history_sync_reply"
+        except Exception as exc:
+            LOGGER.exception("History sync failed chat_id=%s", chat_id)
+            text = f"History sync failed: {exc}"
+            event_type = "command_history_sync_failed"
+        finally:
+            await self._stop_keepalive(keepalive)
+        await self._send_text_message(context, chat_id, text, event_type=event_type)
 
     def _spawn_replacement_operator(self) -> subprocess.Popen:
         script_path = Path(__file__).resolve()
@@ -2146,6 +2568,13 @@ def load_config() -> OperatorConfig:
         codex_model=os.environ.get("TELEGRAM_OPERATOR_CODEX_MODEL", ""),
         safety_mode=safety_mode,
         safe_mode=safety_mode != "full",
+        history_agent_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw",
+        history_device_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", os.environ.get("COMPUTERNAME", "unknown-device")).strip() or "unknown-device",
+        history_remote=os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip(),
+        history_remote_db_path=os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH", "").strip(),
+        history_ssh_key_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""), Path.home() / "Downloads" / "maat_pi_board_ed25519"),
+        history_known_hosts_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""), Path.home() / "Downloads" / "maat_pi_known_hosts"),
+        history_sync_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT", ""), 250),
     )
 
 
@@ -2167,6 +2596,8 @@ async def main() -> None:
     application.add_handler(CommandHandler("start", operator.start))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
+    application.add_handler(CommandHandler("history_status", operator.history_status))
+    application.add_handler(CommandHandler("history_sync", operator.history_sync))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
