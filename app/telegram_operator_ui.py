@@ -292,6 +292,7 @@ class OperatorUi(ctk.CTk):
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.log_box: ctk.CTkTextbox | None = None
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self.refresh_voices()
         self.refresh_status()
@@ -339,7 +340,6 @@ class OperatorUi(ctk.CTk):
         self._entry(connection, "Chat id(s)", "TELEGRAM_ALLOWED_CHAT_IDS", row=2)
         self._entry(connection, "Remote speech host", "TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", row=4)
         self._switch(connection, "Use local speech fallback", "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", row=6)
-        self._switch(connection, "Send startup notice", "TELEGRAM_OPERATOR_STARTUP_NOTICE", row=8)
 
         agent = self._card(body, "Codex", "Home folder, model, and safety controls.", 1, 0)
         self.vars["TELEGRAM_OPERATOR_PROVIDER"] = tk.StringVar(value="codex")
@@ -611,6 +611,7 @@ class OperatorUi(ctk.CTk):
             values["TELEGRAM_OPERATOR_CODEX_MODEL"] = ""
         values["TELEGRAM_OPERATOR_SAFETY_MODE"] = safety_mode(values.get("TELEGRAM_OPERATOR_SAFETY_MODE", ""))
         values["TELEGRAM_OPERATOR_SAFE_MODE"] = "true" if values["TELEGRAM_OPERATOR_SAFETY_MODE"] == "restricted" else "false"
+        values["TELEGRAM_OPERATOR_STARTUP_NOTICE"] = "true"
         workdir = values.get("TELEGRAM_OPERATOR_WORKDIR") or str(DEFAULT_WORKSPACE)
         values["TELEGRAM_OPERATOR_WORKDIR"] = workdir
         values.setdefault("TELEGRAM_OPERATOR_STATE_PATH", str(BASE_DIR / "telegram_operator_state.json"))
@@ -755,19 +756,28 @@ class OperatorUi(ctk.CTk):
         )
         self.after(1500, self.refresh_status)
 
-    def stop_operator(self) -> None:
-        self.set_status("Stopping", "Stopping operator...", None)
+    def _kill_operator_processes(self, *, show_errors: bool = True) -> None:
         for item in operator_processes():
             try:
                 psutil.Process(int(item["ProcessId"])).kill()
             except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                messagebox.showerror("Stop failed", str(exc))
+                if show_errors:
+                    messagebox.showerror("Stop failed", str(exc))
+
+    def stop_operator(self) -> None:
+        self.set_status("Stopping", "Stopping operator...", None)
+        self._kill_operator_processes(show_errors=True)
         self.after(1000, self.refresh_status)
 
     def restart_operator(self) -> None:
         self.save(show_message=False)
         self.stop_operator()
         self.after(1800, self.start_operator)
+
+    def on_close(self) -> None:
+        self.save(show_message=False)
+        self._kill_operator_processes(show_errors=False)
+        self.destroy()
 
 
 if __name__ == "__main__":
