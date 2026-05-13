@@ -2038,6 +2038,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             "While working, send short natural progress updates only when there is a real step change.",
             "Do not create approval loops for small next steps unless there is real risk, missing access, or destructive impact.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
+            "Voice-friendly reply rule: prefer plain conversational text. Avoid decorative Markdown such as bold/italic markers unless necessary. Do not quote long file paths, long numbers, long commands, logs, or code blocks in normal spoken replies; summarize them and include only short labels or essential names. If exact paths, commands, or code are needed, put them after a short spoken summary and keep them minimal.",
             f"Telegram sender: {telegram_user}",
         ]
         if transcript:
