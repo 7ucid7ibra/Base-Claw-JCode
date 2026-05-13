@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from faster_whisper import WhisperModel
 import numpy as np
@@ -199,6 +199,16 @@ def resolve_voice_name(voice: str) -> str:
     return custom_voices.get(voice, voice)
 
 
+def resolve_ffmpeg() -> Optional[str]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return ffmpeg
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
 def synthesize_audio(request: SynthRequest) -> np.ndarray:
     pipeline = get_pipeline(request.lang_code)
     resolved_voice = resolve_voice_name(request.voice)
@@ -267,7 +277,7 @@ def wav_bytes_from_audio(audio: np.ndarray) -> bytes:
 
 
 def convert_wav_to_ogg(wav_bytes: bytes) -> bytes:
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = resolve_ffmpeg()
     if not ffmpeg:
         raise HTTPException(status_code=500, detail="ffmpeg is required for Telegram voice-note conversion")
     with tempfile.TemporaryDirectory(prefix="kokoro-voice-note-") as tmp:
