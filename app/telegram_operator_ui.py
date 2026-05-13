@@ -287,13 +287,12 @@ def operator_processes() -> list[dict]:
     processes = []
     for process in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline"]):
         try:
-            name = (process.info.get("name") or "").lower()
             cmdline = " ".join(process.info.get("cmdline") or [])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        if name not in {"python.exe", "pythonw.exe"}:
-            continue
-        if "telegram_codex_operator.py" not in cmdline:
+        # Cross-platform: macOS/Linux Python process names are often just
+        # "python" or "Python", so detect the operator by its script argument.
+        if OPERATOR_SCRIPT.name not in cmdline:
             continue
         processes.append(
             {
