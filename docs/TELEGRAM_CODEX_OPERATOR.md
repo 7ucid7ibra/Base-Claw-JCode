@@ -72,6 +72,13 @@ Codex settings:
 - `TELEGRAM_OPERATOR_SQLITE_PATH=telegram_operator_messages.sqlite3` stores incoming messages, outgoing replies, callbacks, transcripts, and agent-turn metadata in SQLite. The UI does not expose this path; it is fixed to the app folder by default.
 - `/history_status` reports local raw-message rows that are eligible for shared history sync, how many have synced, and whether the Raspberry Pi sync target is configured.
 - `/history_sync` manually copies unsynced local raw message rows to the configured Raspberry Pi SQLite history database. Sync is append-only and duplicate-safe by `agent:device:local_id` source keys.
+- Board polling:
+  - `TELEGRAM_OPERATOR_BOARD_POLL_ENABLED=true` enables low-frequency checks of the Raspberry Pi board.
+  - `TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS=180` controls the polling interval.
+  - `TELEGRAM_OPERATOR_BOARD_REMOTE` defaults to `TELEGRAM_OPERATOR_HISTORY_REMOTE` when empty.
+  - `TELEGRAM_OPERATOR_BOARD_PATH=/home/ai/agent_board/entries.ndjson` is the board file to read.
+  - `TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES=baseclaw,maat-supervisor,developer-agent` controls which `to` values are relevant for this supervisor.
+  - The poller only sends Telegram notices. It does not run implementation tasks automatically.
 - History sync configuration:
   - `TELEGRAM_OPERATOR_HISTORY_AGENT=baseclaw`
   - `TELEGRAM_OPERATOR_HISTORY_DEVICE=<device-name>`

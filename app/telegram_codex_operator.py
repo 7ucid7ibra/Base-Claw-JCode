@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import queue
 import re
+import shlex
 import secrets
 import shutil
 import sqlite3
@@ -111,6 +113,17 @@ def parse_url_list(raw: str) -> list[str]:
         if url:
             urls.append(url.rstrip("/"))
     return urls
+
+
+def parse_csv_list(raw: str) -> list[str]:
+    values = []
+    seen = set()
+    for part in raw.split(","):
+        value = part.strip()
+        if value and value not in seen:
+            values.append(value)
+            seen.add(value)
+    return values
 
 
 def is_local_speech_url(url: str) -> bool:
@@ -314,6 +327,12 @@ class OperatorConfig:
     history_ssh_key_path: Path
     history_known_hosts_path: Path
     history_sync_limit: int
+    board_poll_enabled: bool
+    board_poll_interval_seconds: int
+    board_remote: str
+    board_path: str
+    board_state_path: Path
+    board_agent_aliases: list[str]
 
 
 @dataclass
@@ -1640,6 +1659,157 @@ class TelegramCodexOperator:
             "StrictHostKeyChecking=yes",
         ]
 
+    def _board_available(self) -> tuple[bool, str]:
+        missing = []
+        if not self.config.board_poll_enabled:
+            missing.append("board polling disabled")
+        if not self.config.board_remote:
+            missing.append("TELEGRAM_OPERATOR_BOARD_REMOTE or TELEGRAM_OPERATOR_HISTORY_REMOTE")
+        if not self.config.board_path:
+            missing.append("TELEGRAM_OPERATOR_BOARD_PATH")
+        if not self.config.history_ssh_key_path.exists():
+            missing.append(f"SSH key missing: {self.config.history_ssh_key_path}")
+        if not self.config.history_known_hosts_path.exists():
+            missing.append(f"known_hosts missing: {self.config.history_known_hosts_path}")
+        if missing:
+            return False, "; ".join(missing)
+        return True, "configured"
+
+    def _board_ssh_base_command(self) -> list[str]:
+        return [
+            "ssh",
+            "-i",
+            str(self.config.history_ssh_key_path),
+            "-o",
+            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=10",
+            self.config.board_remote,
+        ]
+
+    def _load_board_state(self) -> dict[str, Any]:
+        if not self.config.board_state_path.exists():
+            return {"initialized": False, "seen": []}
+        try:
+            data = json.loads(self.config.board_state_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            return {"initialized": False, "seen": []}
+        data.setdefault("initialized", False)
+        data.setdefault("seen", [])
+        return data
+
+    def _save_board_state(self, state: dict[str, Any]) -> None:
+        self.config.board_state_path.parent.mkdir(parents=True, exist_ok=True)
+        state["seen"] = list(dict.fromkeys(state.get("seen", [])))[-500:]
+        self.config.board_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _board_entry_id(self, raw_line: str) -> str:
+        return hashlib.sha256(raw_line.encode("utf-8", errors="replace")).hexdigest()
+
+    def _fetch_board_entries(self) -> list[dict[str, Any]]:
+        available, detail = self._board_available()
+        if not available:
+            raise RuntimeError(detail)
+        remote_command = f"tail -n 80 {shlex.quote(self.config.board_path)}"
+        result = subprocess.run(
+            [*self._board_ssh_base_command(), remote_command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "board fetch failed")
+        entries = []
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip().lstrip("\ufeff")
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entry["_entry_id"] = self._board_entry_id(line)
+            entries.append(entry)
+        return entries
+
+    def _board_entry_relevant(self, entry: dict[str, Any]) -> bool:
+        sender = str(entry.get("agent") or "").strip()
+        if sender in set(self.config.board_agent_aliases):
+            return False
+        if str(entry.get("type") or "").strip() in {"result", "source_update_result", "source_baseline_update"}:
+            return False
+        target = entry.get("to")
+        if target is None:
+            return False
+        targets = target if isinstance(target, list) else [target]
+        aliases = {alias.lower() for alias in self.config.board_agent_aliases}
+        aliases.add("all")
+        return any(str(item).strip().lower() in aliases for item in targets)
+
+    def _format_board_notice(self, entry: dict[str, Any]) -> str:
+        body = entry.get("body")
+        if isinstance(body, dict):
+            body_text = json.dumps(body, ensure_ascii=False)
+        else:
+            body_text = str(body or "").strip()
+        if len(body_text) > 1200:
+            body_text = body_text[:1197].rstrip() + "..."
+        return (
+            "New Raspberry Pi board entry noticed.\n"
+            f"From: {entry.get('agent', 'unknown')}\n"
+            f"Type: {entry.get('type', 'unknown')}\n"
+            f"Thread: {entry.get('thread_id', 'none')}\n"
+            f"Task: {entry.get('task_id', 'none')}\n"
+            f"Status: {entry.get('status', 'none')}\n\n"
+            f"{body_text}\n\n"
+            "I will not implement this automatically. Reply with `Go` if you want me to proceed."
+        )
+
+    async def board_poll_loop(self, application: Application) -> None:
+        available, detail = self._board_available()
+        if not available:
+            LOGGER.info("Board polling not active: %s", detail)
+            return
+        while True:
+            try:
+                entries = await asyncio.to_thread(self._fetch_board_entries)
+                state = await asyncio.to_thread(self._load_board_state)
+                seen = set(state.get("seen", []))
+                current_ids = [entry["_entry_id"] for entry in entries]
+                if not state.get("initialized"):
+                    state["initialized"] = True
+                    state["seen"] = current_ids
+                    await asyncio.to_thread(self._save_board_state, state)
+                    LOGGER.info("Board polling initialized seen=%s", len(current_ids))
+                else:
+                    new_relevant = [
+                        entry
+                        for entry in entries
+                        if entry["_entry_id"] not in seen and self._board_entry_relevant(entry)
+                    ]
+                    if new_relevant:
+                        state["seen"] = list(seen.union(current_ids))
+                        await asyncio.to_thread(self._save_board_state, state)
+                        for entry in new_relevant:
+                            text = self._format_board_notice(entry)
+                            for chat_id in self.config.allowed_chat_ids:
+                                try:
+                                    await application.bot.send_message(chat_id=chat_id, text=text)
+                                except Exception:
+                                    LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
+                    elif current_ids:
+                        state["seen"] = list(seen.union(current_ids))
+                        await asyncio.to_thread(self._save_board_state, state)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("Board polling failed: %s", exc)
+            await asyncio.sleep(self.config.board_poll_interval_seconds)
+
     def _sync_history_to_pi(self) -> dict[str, Any]:
         available, detail = self._history_sync_available()
         if not available:
@@ -2055,7 +2225,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Voice: {self.config.kokoro_voice}\n"
             f"Whisper model: {self.config.whisper_model_name}\n"
             f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
-            f"Local speech fallback: {self.config.local_speech_fallback}"
+            f"Local speech fallback: {self.config.local_speech_fallback}\n"
+            f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}"
         )
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
@@ -2716,6 +2887,22 @@ def load_config() -> OperatorConfig:
     safety_mode = os.environ.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip().lower()
     if safety_mode not in {"restricted", "safe", "code", "full"}:
         safety_mode = "restricted" if parse_bool(os.environ.get("TELEGRAM_OPERATOR_SAFE_MODE", ""), False) else "safe"
+    history_remote = os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip()
+    history_ssh_key_path = resolve_app_path(
+        os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""),
+        Path.home() / "Downloads" / "maat_pi_board_ed25519",
+    )
+    history_known_hosts_path = resolve_app_path(
+        os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""),
+        Path.home() / "Downloads" / "maat_pi_known_hosts",
+    )
+    history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
+    board_aliases = parse_csv_list(
+        os.environ.get(
+            "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
+            f"{history_agent_name},baseclaw,maat-supervisor,developer-agent",
+        )
+    )
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
         allowed_chat_ids=parse_allowed_chat_ids(require_env("TELEGRAM_ALLOWED_CHAT_IDS")),
@@ -2736,13 +2923,22 @@ def load_config() -> OperatorConfig:
         codex_model=os.environ.get("TELEGRAM_OPERATOR_CODEX_MODEL", ""),
         safety_mode=safety_mode,
         safe_mode=safety_mode != "full",
-        history_agent_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw",
+        history_agent_name=history_agent_name,
         history_device_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", os.environ.get("COMPUTERNAME", "unknown-device")).strip() or "unknown-device",
-        history_remote=os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip(),
+        history_remote=history_remote,
         history_remote_db_path=os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH", "").strip(),
-        history_ssh_key_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""), Path.home() / "Downloads" / "maat_pi_board_ed25519"),
-        history_known_hosts_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""), Path.home() / "Downloads" / "maat_pi_known_hosts"),
+        history_ssh_key_path=history_ssh_key_path,
+        history_known_hosts_path=history_known_hosts_path,
         history_sync_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT", ""), 250),
+        board_poll_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", ""), True),
+        board_poll_interval_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS", ""), 180),
+        board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
+        board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "/home/ai/agent_board/entries.ndjson").strip(),
+        board_state_path=resolve_app_path(
+            os.environ.get("TELEGRAM_OPERATOR_BOARD_STATE_PATH", ""),
+            BASE_DIR / "telegram_operator_board_state.json",
+        ),
+        board_agent_aliases=board_aliases,
     )
 
 
@@ -2778,6 +2974,7 @@ async def main() -> None:
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
+    board_task = asyncio.create_task(operator.board_poll_loop(application))
     if config.startup_notice:
         for chat_id in config.allowed_chat_ids:
             try:
@@ -2795,6 +2992,11 @@ async def main() -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        board_task.cancel()
+        try:
+            await board_task
+        except asyncio.CancelledError:
+            pass
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
