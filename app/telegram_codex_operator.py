@@ -135,6 +135,43 @@ def normalize_speech_url(url: str) -> str:
     return url
 
 
+def tailscale_speech_urls() -> list[str]:
+    executable = shutil.which("tailscale") or shutil.which("tailscale.exe")
+    if not executable:
+        return []
+    try:
+        result = subprocess.run(
+            [executable, "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    urls = []
+    for line in result.stdout.splitlines():
+        ip = line.strip()
+        if re.fullmatch(r"100(?:\.\d{1,3}){3}", ip):
+            urls.append(f"http://{ip}:8766")
+    return urls
+
+
+def unique_urls(urls: list[str]) -> list[str]:
+    unique = []
+    seen = set()
+    for url in urls:
+        normalized = normalize_speech_url(url)
+        if normalized and normalized not in seen:
+            unique.append(normalized)
+            seen.add(normalized)
+    return unique
+
+
 def build_speech_urls(remote_url: str, local_fallback: bool = True) -> list[str]:
     urls = []
     remote_url = normalize_speech_url(remote_url)
@@ -143,7 +180,40 @@ def build_speech_urls(remote_url: str, local_fallback: bool = True) -> list[str]
         urls.append(remote_url)
     if local_fallback:
         urls.append(local_url)
-    return urls
+        urls.extend(tailscale_speech_urls())
+    return unique_urls(urls)
+
+
+def infer_kokoro_lang_code(voice: str, fallback: str = "a") -> str:
+    prefix_map = {
+        "af_": "a",
+        "am_": "a",
+        "bf_": "b",
+        "bm_": "b",
+        "dm_": "d",
+    }
+    for prefix, lang_code in prefix_map.items():
+        if voice.startswith(prefix):
+            return lang_code
+    return fallback or "a"
+
+
+def update_operator_env(values: dict[str, str]) -> None:
+    lines = []
+    seen = set()
+    if OPERATOR_ENV_PATH.exists():
+        for raw_line in OPERATOR_ENV_PATH.read_text(encoding="utf-8-sig").splitlines():
+            if raw_line.strip() and not raw_line.lstrip().startswith("#") and "=" in raw_line:
+                key = raw_line.split("=", 1)[0].strip().lstrip("\ufeff")
+                if key in values:
+                    lines.append(f"{key}={values[key]}")
+                    seen.add(key)
+                    continue
+            lines.append(raw_line)
+    for key, value in values.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+    OPERATOR_ENV_PATH.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
 def hidden_subprocess_kwargs() -> dict:
@@ -1990,6 +2060,104 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
 
+    def _available_voices(self) -> list[str]:
+        voices: list[str] = []
+        for server_url in self.config.kokoro_urls:
+            try:
+                response = requests.get(server_url.rstrip("/") + "/voices", timeout=(4, 12))
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:
+                LOGGER.warning("Voice discovery failed url=%s error=%s", server_url, exc)
+                continue
+            for value in data.values():
+                if isinstance(value, list):
+                    voices.extend(str(item) for item in value)
+                elif isinstance(value, dict):
+                    for nested in value.values():
+                        if isinstance(nested, list):
+                            voices.extend(str(item) for item in nested)
+            if voices:
+                break
+        if self.config.kokoro_voice and self.config.kokoro_voice not in voices:
+            voices.insert(0, self.config.kokoro_voice)
+        return sorted(set(voices))
+
+    async def voice_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_voice",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/voice",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        voices = await asyncio.to_thread(self._available_voices)
+        if not voices:
+            await self._send_text_message(
+                context,
+                chat_id,
+                "No Kokoro voices found. I could not reach /voices on the configured speech hosts.",
+                event_type="command_voice_no_voices",
+            )
+            return
+        buttons = [
+            InlineKeyboardButton(
+                f"{'✓ ' if voice == self.config.kokoro_voice else ''}{voice}",
+                callback_data=f"voice:set:{voice}",
+            )
+            for voice in voices[:48]
+        ]
+        rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Current voice: {self.config.kokoro_voice}\nChoose a Kokoro voice:",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def on_voice_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.message:
+            return
+        await query.answer()
+        chat_id = query.message.chat_id
+        if not self._authorized(chat_id):
+            await query.edit_message_text("Unauthorized chat.")
+            return
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3 or parts[1] != "set":
+            await query.edit_message_text("Unknown voice action.")
+            return
+        voice = parts[2].strip()
+        available = await asyncio.to_thread(self._available_voices)
+        if voice not in available:
+            await query.edit_message_text(f"Voice is no longer available: {voice}")
+            return
+        lang_code = infer_kokoro_lang_code(voice, self.config.kokoro_lang_code)
+        self.config.kokoro_voice = voice
+        self.config.kokoro_lang_code = lang_code
+        self.voice.voice = voice
+        self.voice.lang_code = lang_code
+        await asyncio.to_thread(
+            update_operator_env,
+            {
+                "TELEGRAM_OPERATOR_KOKORO_VOICE": voice,
+                "TELEGRAM_OPERATOR_KOKORO_LANG_CODE": lang_code,
+            },
+        )
+        self.message_store.append(
+            direction="internal",
+            event_type="voice_changed",
+            chat_id=chat_id,
+            message_type="callback",
+            text=f"Voice changed to {voice}",
+            metadata={"voice": voice, "lang_code": lang_code},
+        )
+        await query.edit_message_text(f"Voice changed to {voice}.\nLanguage code: {lang_code}")
+        await self._send_voice_reply(context, chat_id, f"Voice changed to {voice}.")
+
     async def history_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
         self._record_incoming_message(
@@ -2596,10 +2764,12 @@ async def main() -> None:
     application.add_handler(CommandHandler("start", operator.start))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
+    application.add_handler(CommandHandler("voice", operator.voice_menu))
     application.add_handler(CommandHandler("history_status", operator.history_status))
     application.add_handler(CommandHandler("history_sync", operator.history_sync))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
+    application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
     application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))

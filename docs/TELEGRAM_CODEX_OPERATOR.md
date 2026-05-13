@@ -80,8 +80,9 @@ Codex settings:
   - `TELEGRAM_OPERATOR_HISTORY_SSH_KEY=<private-key-path>`
   - `TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS=<known-hosts-path>`
   - `TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT=250`
-- `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the single optional remote host for both Kokoro TTS and Whisper transcription. If it is empty or unreachable, the bridge falls back to local `http://127.0.0.1:8766`.
-- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK=true` controls whether the client tries local `127.0.0.1:8766` when the remote host is empty or unavailable. Set it to `false` for host-only lightweight clients.
+- `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the single optional remote host for both Kokoro TTS and Whisper transcription. If it is empty or unreachable, the bridge falls back to local speech candidates.
+- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK=true` controls whether the client tries local speech candidates when the remote host is empty or unavailable. Local candidates include `http://127.0.0.1:8766` and the device's Tailscale `100.x.x.x:8766` address when `tailscale ip -4` is available.
+- `/voice` opens a Telegram inline keyboard with voices discovered from the active Kokoro host. Selecting a voice updates the running operator immediately and persists `TELEGRAM_OPERATOR_KOKORO_VOICE` plus the inferred language code to `.env.telegram-operator`.
 - `TELEGRAM_OPERATOR_STARTUP_NOTICE=true` sends a short Telegram text notice to the allowed chat ids after the operator starts.
 - The remote speech host can be entered as a bare IP or hostname. The app adds `http://` and port `8766` automatically when they are omitted.
 - If no workspace is selected, the app uses `agent_workspace` in this folder. Its default map is `agent/skills`, `agent/memory`, `agent/senses`, `work/prototypes`, `work/projects`, and `work/routines`.

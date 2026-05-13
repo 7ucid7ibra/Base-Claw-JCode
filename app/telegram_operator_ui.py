@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -197,10 +198,44 @@ def speech_health(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def tailscale_speech_urls() -> list[str]:
+    executable = shutil.which("tailscale") or shutil.which("tailscale.exe")
+    if not executable:
+        return []
+    try:
+        result = subprocess.run(
+            [executable, "ip", "-4"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    return [f"http://{line.strip()}:8766" for line in result.stdout.splitlines() if re.fullmatch(r"100(?:\.\d{1,3}){3}", line.strip())]
+
+
+def local_speech_urls() -> list[str]:
+    urls = [DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]]
+    urls.extend(tailscale_speech_urls())
+    unique = []
+    seen = set()
+    for url in urls:
+        normalized = normalize_speech_url(url)
+        if normalized and normalized not in seen:
+            unique.append(normalized)
+            seen.add(normalized)
+    return unique
+
+
 def start_local_speech_host() -> tuple[bool, str]:
-    url = DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]
-    if speech_health(url):
-        return True, "Local speech host is already running."
+    for url in local_speech_urls():
+        if speech_health(url):
+            return True, f"Local speech host is already running at {url}."
     python = BASE_DIR / ".venv-kokoro" / "Scripts" / "pythonw.exe"
     if not python.exists():
         python = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
@@ -214,7 +249,7 @@ def start_local_speech_host() -> tuple[bool, str]:
     )
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
-        if speech_health(url):
+        if speech_health(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]):
             return True, "Started local speech host."
         time.sleep(1)
     return False, "Timed out waiting for local speech host on 127.0.0.1:8766."
@@ -638,6 +673,11 @@ class OperatorUi(ctk.CTk):
                 messagebox.showerror("Speech host unreachable", f"Remote speech host is unreachable:\n{remote}")
                 return False
         if local_fallback:
+            for url in local_speech_urls():
+                if speech_health(url):
+                    self.set_status("Speech ready", f"Using local speech host at {url}.", None)
+                    self.refresh_voices()
+                    return True
             ok, detail = start_local_speech_host()
             if not ok:
                 self.set_status("Speech offline", detail, False)
@@ -673,7 +713,7 @@ class OperatorUi(ctk.CTk):
         remote = normalize_speech_url(remote)
         if remote:
             urls.append(remote)
-        urls.append(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"])
+        urls.extend(local_speech_urls())
 
         voices = []
         seen_urls = set()
