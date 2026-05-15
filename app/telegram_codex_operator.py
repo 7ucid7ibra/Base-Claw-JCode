@@ -465,6 +465,23 @@ class SQLiteMessageStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_history_sync_synced_at ON history_sync_state(synced_at)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS board_action_cards (
+                    card_id TEXT NOT NULL,
+                    card_type TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    entry_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    choice TEXT,
+                    PRIMARY KEY (card_id, card_type)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_board_action_cards_chat ON board_action_cards(chat_id, card_type)"
+            )
 
     def append(
         self,
@@ -677,6 +694,60 @@ class SQLiteMessageStore:
                     sync_error=excluded.sync_error
                 """,
                 [(local_id, error[:1000]) for local_id in local_ids],
+            )
+
+    def save_board_action_card(self, *, card_id: str, card_type: str, chat_id: int, entry: dict[str, Any]) -> None:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO board_action_cards (card_id, card_type, chat_id, entry_json, created_at, updated_at, choice)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(card_id, card_type) DO UPDATE SET
+                    chat_id=excluded.chat_id,
+                    entry_json=excluded.entry_json,
+                    updated_at=excluded.updated_at
+                """,
+                (card_id, card_type, chat_id, json.dumps(entry, ensure_ascii=True, default=str), now, now),
+            )
+
+    def load_board_action_card(self, *, card_id: str, card_type: str) -> Optional[dict[str, Any]]:
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT card_id, card_type, chat_id, entry_json, created_at, updated_at, choice
+                FROM board_action_cards
+                WHERE card_id = ? AND card_type = ?
+                """,
+                (card_id, card_type),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            entry = json.loads(row["entry_json"])
+        except json.JSONDecodeError:
+            LOGGER.exception("Stored board action card is invalid card_id=%s card_type=%s", card_id, card_type)
+            return None
+        return {
+            "card_id": row["card_id"],
+            "card_type": row["card_type"],
+            "chat_id": int(row["chat_id"]),
+            "entry": entry,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "choice": row["choice"],
+        }
+
+    def mark_board_action_card(self, *, card_id: str, card_type: str, choice: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE board_action_cards
+                SET choice = ?, updated_at = ?
+                WHERE card_id = ? AND card_type = ?
+                """,
+                (choice, utc_now(), card_id, card_type),
             )
 
 
@@ -1822,6 +1893,22 @@ class TelegramCodexOperator:
         choices = state.setdefault("board_entry_choices", {})
         choices[board_entry_id] = {"choice": choice, "time": utc_now()}
         self._save_board_state(state)
+        self.message_store.mark_board_action_card(card_id=board_entry_id, card_type="board", choice=choice)
+
+    def _load_pending_board_entry(self, board_entry_id: str) -> Optional[PendingBoardEntry]:
+        pending = self.pending_board_entries.get(board_entry_id)
+        if pending is not None:
+            return pending
+        card = self.message_store.load_board_action_card(card_id=board_entry_id, card_type="board")
+        if not card:
+            return None
+        pending = PendingBoardEntry(
+            chat_id=int(card["chat_id"]),
+            entry=card["entry"],
+            created_at=str(card.get("created_at") or utc_now()),
+        )
+        self.pending_board_entries[board_entry_id] = pending
+        return pending
 
     async def _send_board_entry_card(
         self,
@@ -1834,6 +1921,12 @@ class TelegramCodexOperator:
             chat_id=chat_id,
             entry=entry,
             created_at=utc_now(),
+        )
+        self.message_store.save_board_action_card(
+            card_id=board_entry_id,
+            card_type="board",
+            chat_id=chat_id,
+            entry=entry,
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -1917,6 +2010,22 @@ class TelegramCodexOperator:
         choices = state.setdefault("source_update_choices", {})
         choices[source_update_id] = {"choice": choice, "time": utc_now()}
         self._save_board_state(state)
+        self.message_store.mark_board_action_card(card_id=source_update_id, card_type="source", choice=choice)
+
+    def _load_pending_source_update(self, source_update_id: str) -> Optional[PendingSourceUpdate]:
+        pending = self.pending_source_updates.get(source_update_id)
+        if pending is not None:
+            return pending
+        card = self.message_store.load_board_action_card(card_id=source_update_id, card_type="source")
+        if not card:
+            return None
+        pending = PendingSourceUpdate(
+            chat_id=int(card["chat_id"]),
+            entry=card["entry"],
+            created_at=str(card.get("created_at") or utc_now()),
+        )
+        self.pending_source_updates[source_update_id] = pending
+        return pending
 
     def _validate_source_update_for_pull(self, pending: PendingSourceUpdate) -> tuple[bool, str, dict[str, Any]]:
         body = self._source_update_payload(pending.entry)
@@ -1967,6 +2076,12 @@ class TelegramCodexOperator:
             chat_id=chat_id,
             entry=entry,
             created_at=utc_now(),
+        )
+        self.message_store.save_board_action_card(
+            card_id=source_update_id,
+            card_type="source",
+            chat_id=chat_id,
+            entry=entry,
         )
         keyboard = InlineKeyboardMarkup(
             [
@@ -2643,30 +2758,40 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
-        try:
-            replacement = self._spawn_replacement_operator()
-        except Exception as exc:
-            LOGGER.exception("Operator self-restart spawn failed")
-            await self._send_text_message(
-                context,
-                chat_id,
-                f"Restart failed before the new operator could start: {exc}",
-                event_type="command_restart_operator_failed",
-            )
-            return
+        supervised = parse_bool(os.environ.get("BASECLAW_SUPERVISED", ""), False)
+        replacement_pid: Optional[int] = None
+        if not supervised:
+            try:
+                replacement = self._spawn_replacement_operator()
+                replacement_pid = replacement.pid
+            except Exception as exc:
+                LOGGER.exception("Operator self-restart spawn failed")
+                await self._send_text_message(
+                    context,
+                    chat_id,
+                    f"Restart failed before the new operator could start: {exc}",
+                    event_type="command_restart_operator_failed",
+                )
+                return
 
         LOGGER.info(
-            "Operator self-restart requested chat_id=%s old_pid=%s new_pid=%s",
+            "Operator self-restart requested chat_id=%s old_pid=%s new_pid=%s supervised=%s",
             chat_id,
             os.getpid(),
-            replacement.pid,
+            replacement_pid,
+            supervised,
+        )
+        reply = (
+            "Restarting the Telegram operator now. The supervisor should bring me back online automatically."
+            if supervised
+            else "Restarting the Telegram operator now. If everything worked, I should come back online automatically."
         )
         await self._send_text_message(
             context,
             chat_id,
-            "Restarting the Telegram operator now. If everything worked, I should come back online automatically.",
+            reply,
             event_type="command_restart_operator_reply",
-            metadata={"old_pid": os.getpid(), "new_pid": replacement.pid},
+            metadata={"old_pid": os.getpid(), "new_pid": replacement_pid, "supervised": supervised},
         )
         asyncio.create_task(self._exit_after_restart())
 
@@ -3075,6 +3200,18 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         asyncio.create_task(self._run_approved_pending(context, pending))
 
     async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            await self._handle_source_update_callback(update, context)
+        except Exception as exc:
+            LOGGER.exception("Source update callback failed")
+            query = update.callback_query
+            if query:
+                try:
+                    await query.answer(f"Button failed: {exc}", show_alert=True)
+                except Exception:
+                    LOGGER.exception("Failed to answer failed source update callback")
+
+    async def _handle_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.data:
             return
@@ -3097,9 +3234,14 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         action, source_update_id = parts[1], parts[2]
         self._record_callback(update, f"source_{action}", source_update_id)
-        pending = self.pending_source_updates.get(source_update_id)
+        pending = self._load_pending_source_update(source_update_id)
         if pending is None:
-            await query.answer("This source update is no longer pending.", show_alert=True)
+            await query.answer("This source update card expired. Ask me to refresh board notices.", show_alert=True)
+            if message:
+                try:
+                    await query.edit_message_text("This source update card expired. Ask me to refresh board notices.")
+                except Exception:
+                    LOGGER.exception("Failed to edit expired source update card chat_id=%s", chat_id)
             return
         if pending.chat_id != chat_id:
             await query.answer("This update belongs to a different chat.", show_alert=True)
@@ -3150,6 +3292,18 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 LOGGER.exception("Failed to edit source update card chat_id=%s", chat_id)
 
     async def on_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            await self._handle_board_entry_callback(update, context)
+        except Exception as exc:
+            LOGGER.exception("Board entry callback failed")
+            query = update.callback_query
+            if query:
+                try:
+                    await query.answer(f"Button failed: {exc}", show_alert=True)
+                except Exception:
+                    LOGGER.exception("Failed to answer failed board entry callback")
+
+    async def _handle_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
         if not query or not query.data:
             return
@@ -3172,9 +3326,14 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         action, board_entry_id = parts[1], parts[2]
         self._record_callback(update, f"board_{action}", board_entry_id)
-        pending = self.pending_board_entries.get(board_entry_id)
+        pending = self._load_pending_board_entry(board_entry_id)
         if pending is None:
-            await query.answer("This board entry is no longer pending.", show_alert=True)
+            await query.answer("This board card expired. Ask me to refresh board notices.", show_alert=True)
+            if message:
+                try:
+                    await query.edit_message_text("This board card expired. Ask me to refresh board notices.")
+                except Exception:
+                    LOGGER.exception("Failed to edit expired board entry card chat_id=%s", chat_id)
             return
         if pending.chat_id != chat_id:
             await query.answer("This board entry belongs to a different chat.", show_alert=True)

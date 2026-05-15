@@ -4,7 +4,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 import time
 import tkinter as tk
 from pathlib import Path
@@ -23,6 +22,7 @@ BASE_DIR = PROJECT_ROOT
 DEFAULT_WORKSPACE = PROJECT_ROOT / "agent_workspace"
 ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
+SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
@@ -303,8 +303,8 @@ def operator_processes() -> list[dict]:
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         # Cross-platform: macOS/Linux Python process names are often just
-        # "python" or "Python", so detect the operator by its script argument.
-        if OPERATOR_SCRIPT.name not in cmdline:
+        # "python" or "Python", so detect the operator/supervisor by script argument.
+        if OPERATOR_SCRIPT.name not in cmdline and SUPERVISOR_SCRIPT.name not in cmdline:
             continue
         processes.append(
             {
@@ -797,23 +797,34 @@ class OperatorUi(ctk.CTk):
             self.refresh_log()
             return
         self.set_status("Starting", "Starting operator...", None)
-        python = BASE_DIR / ".venv-telegram-agent" / "Scripts" / "pythonw.exe"
-        if not python.exists():
-            python = BASE_DIR / ".venv-telegram-agent" / "Scripts" / "python.exe"
+        if not SUPERVISOR_SCRIPT.exists():
+            self.set_status("Setup needed", f"Missing supervisor script: {SUPERVISOR_SCRIPT}", False)
+            messagebox.showerror("Setup needed", f"Missing supervisor script:\n{SUPERVISOR_SCRIPT}")
+            return
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
         subprocess.Popen(
-            [str(python if python.exists() else sys.executable), str(OPERATOR_SCRIPT)],
+            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT)],
             cwd=str(BASE_DIR),
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         self.after(1500, self.refresh_status)
 
     def _kill_operator_processes(self, *, show_errors: bool = True) -> None:
-        for item in operator_processes():
-            try:
-                psutil.Process(int(item["ProcessId"])).kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
-                if show_errors:
-                    messagebox.showerror("Stop failed", str(exc))
+        def kill_items(items: list[dict]) -> None:
+            for item in items:
+                try:
+                    psutil.Process(int(item["ProcessId"])).kill()
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+                    if show_errors:
+                        messagebox.showerror("Stop failed", str(exc))
+
+        processes = operator_processes()
+        supervisors = [item for item in processes if SUPERVISOR_SCRIPT.name in item.get("CommandLine", "")]
+        workers = [item for item in processes if item not in supervisors]
+        kill_items(supervisors)
+        kill_items(workers)
+        time.sleep(0.4)
+        kill_items(operator_processes())
 
     def stop_operator(self) -> None:
         self.set_status("Stopping", "Stopping operator...", None)
