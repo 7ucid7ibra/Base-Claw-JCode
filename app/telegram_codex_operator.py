@@ -247,6 +247,21 @@ def agent_subprocess_kwargs() -> dict:
     return kwargs
 
 
+def agent_subprocess_env() -> dict[str, str]:
+    """Run coding agents without inheriting BaseClaw's Telegram bot credentials."""
+    env = os.environ.copy()
+    blocked_keys = {
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_ALLOWED_CHAT_IDS",
+        "TELEGRAM_ALLOWED_CHAT_ID",
+        "TELEGRAM_CHAT_ID",
+    }
+    for key in list(env):
+        if key in blocked_keys:
+            env.pop(key, None)
+    return env
+
+
 def terminate_process_tree(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
@@ -897,6 +912,7 @@ class CodexBridge:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=agent_subprocess_env(),
                 **agent_subprocess_kwargs(),
             )
 
@@ -1053,7 +1069,7 @@ class GenericCliBridge:
                 workdir=str(self.workdir),
                 session_id=session_id or "",
             )
-            env = os.environ.copy()
+            env = agent_subprocess_env()
             env["TELEGRAM_OPERATOR_PROVIDER"] = self.provider
             env["TELEGRAM_OPERATOR_WORKDIR"] = str(self.workdir)
             env["TELEGRAM_OPERATOR_SESSION_ID"] = session_id or ""
@@ -1138,6 +1154,7 @@ class LocalCliBridge:
                 cwd=str(self.workdir),
                 encoding="utf-8",
                 errors="replace",
+                env=agent_subprocess_env(),
                 timeout=self.timeout_seconds,
                 **hidden_subprocess_kwargs(),
             )
