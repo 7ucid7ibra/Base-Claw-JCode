@@ -57,6 +57,8 @@ STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
 PDF_EXTRACT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
+VIDEO_MIME_PREFIX = "video/"
 
 
 def utc_now() -> str:
@@ -93,6 +95,12 @@ def parse_positive_int(raw: str, default: int) -> int:
 def safe_filename(name: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
     return cleaned or "document.pdf"
+
+
+def is_video_file(filename: str, mime_type: str) -> bool:
+    if (mime_type or "").lower().startswith(VIDEO_MIME_PREFIX):
+        return True
+    return Path(filename or "").suffix.lower() in VIDEO_EXTENSIONS
 
 
 def parse_bool(raw: str, default: bool) -> bool:
@@ -2829,6 +2837,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         filename = document.file_name or "document.pdf"
         mime_type = document.mime_type or ""
         is_pdf = mime_type.lower() == "application/pdf" or filename.lower().endswith(".pdf")
+        is_video_document = is_video_file(filename, mime_type)
         document_metadata = {
             "document_file_id": document.file_id,
             "document_file_unique_id": document.file_unique_id,
@@ -2847,11 +2856,27 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
+        if is_video_document and not is_pdf:
+            await self._process_video_attachment(
+                update,
+                context,
+                file_id=document.file_id,
+                file_unique_id=document.file_unique_id,
+                filename=filename,
+                mime_type=mime_type,
+                file_size=document.file_size,
+                duration=None,
+                width=None,
+                height=None,
+                caption=update.message.caption,
+                source="document",
+            )
+            return
         if not is_pdf:
             await self._send_text_message(
                 context,
                 chat_id,
-                "I received a document, but it is not a PDF. For now I only handle PDF documents.",
+                "I received a document, but it is not a PDF or video. For now I only handle PDF and video documents.",
                 event_type="unsupported_document",
             )
             return
@@ -2919,6 +2944,101 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                     "This PDF likely needs OCR or vision analysis.",
                 ]
             )
+        await self._process_user_message(update, context, body, keepalive=keepalive)
+
+    async def _process_video_attachment(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        file_id: str,
+        file_unique_id: str,
+        filename: str,
+        mime_type: str,
+        file_size: Optional[int],
+        duration: Optional[int],
+        width: Optional[int],
+        height: Optional[int],
+        caption: Optional[str],
+        source: str,
+    ) -> None:
+        if not update.message:
+            return
+        chat_id = update.effective_chat.id
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+        upload_dir = self.config.workdir / "telegram_uploads" / "videos"
+        metadata = {
+            "source": source,
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "file_name": filename,
+            "mime_type": mime_type,
+            "file_size": file_size,
+            "duration": duration,
+            "width": width,
+            "height": height,
+            "caption": caption,
+        }
+        try:
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            suffix = Path(filename or "").suffix
+            if not suffix:
+                if mime_type == "video/quicktime":
+                    suffix = ".mov"
+                elif mime_type == "video/webm":
+                    suffix = ".webm"
+                else:
+                    suffix = ".mp4"
+            saved_name = f"{update.message.message_id}_{file_unique_id}{suffix}"
+            video_path = upload_dir / safe_filename(saved_name)
+            telegram_file = await context.bot.get_file(file_id)
+            await telegram_file.download_to_drive(custom_path=str(video_path))
+            metadata["saved_path"] = str(video_path)
+            self.message_store.append(
+                direction="in",
+                event_type="video_saved",
+                chat_id=chat_id,
+                telegram_message_id=update.message.message_id,
+                telegram_user_id=update.effective_user.id if update.effective_user else None,
+                telegram_username=update.effective_user.username if update.effective_user else None,
+                telegram_full_name=update.effective_user.full_name if update.effective_user else None,
+                message_type="video",
+                text=caption,
+                safe_mode=self.config.safe_mode,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            LOGGER.exception("Video handling failed chat_id=%s source=%s", chat_id, source)
+            await self._stop_keepalive(keepalive)
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Video handling failed before it reached Codex: {exc}",
+                event_type="video_handling_failed",
+            )
+            return
+
+        details = [
+            f"Saved locally as: {video_path}",
+            f"Source: Telegram {source}",
+        ]
+        if duration is not None:
+            details.append(f"Duration: {duration} seconds")
+        if width and height:
+            details.append(f"Dimensions: {width}x{height}")
+        if mime_type:
+            details.append(f"MIME type: {mime_type}")
+        if file_size is not None:
+            details.append(f"File size: {file_size} bytes")
+
+        body = "\n\n".join(
+            [
+                caption or "Please process this Telegram video attachment.",
+                "Telegram video received.",
+                "\n".join(details),
+                "Preserve the original file and use a working copy for edits.",
+            ]
+        )
         await self._process_user_message(update, context, body, keepalive=keepalive)
 
     async def _download_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, index: int) -> dict[str, Any]:
@@ -3054,6 +3174,49 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
 
         await self._process_photo_updates([update], context)
+
+    async def on_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.message.video:
+            return
+        chat_id = update.effective_chat.id
+        video = update.message.video
+        filename = video.file_name or f"telegram_video_{update.message.message_id}.mp4"
+        mime_type = video.mime_type or ""
+        metadata = {
+            "file_id": video.file_id,
+            "file_unique_id": video.file_unique_id,
+            "file_name": filename,
+            "mime_type": mime_type,
+            "file_size": video.file_size,
+            "duration": video.duration,
+            "width": video.width,
+            "height": video.height,
+            "caption": update.message.caption,
+        }
+        self._record_incoming_message(
+            update,
+            event_type="incoming_video",
+            message_type="video",
+            text=update.message.caption,
+            metadata=metadata,
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        await self._process_video_attachment(
+            update,
+            context,
+            file_id=video.file_id,
+            file_unique_id=video.file_unique_id,
+            filename=filename,
+            mime_type=mime_type,
+            file_size=video.file_size,
+            duration=video.duration,
+            width=video.width,
+            height=video.height,
+            caption=update.message.caption,
+            source="video",
+        )
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
@@ -3500,6 +3663,7 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
     application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
+    application.add_handler(MessageHandler(filters.VIDEO, operator.on_video))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
     application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))
     application.add_handler(MessageHandler(filters.VOICE, operator.on_voice))
