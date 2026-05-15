@@ -360,6 +360,13 @@ class PendingApproval:
     created_at: str
 
 
+@dataclass
+class PendingSourceUpdate:
+    chat_id: int
+    entry: dict[str, Any]
+    created_at: str
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = path
@@ -1276,6 +1283,7 @@ class TelegramCodexOperator:
         self.voice = KokoroVoiceReply(config.kokoro_urls, config.kokoro_voice, config.kokoro_lang_code)
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
+        self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
 
     def _lock_for(self, chat_id: int) -> asyncio.Lock:
@@ -1757,7 +1765,9 @@ class TelegramCodexOperator:
         sender = str(entry.get("agent") or "").strip()
         if sender in set(self.config.board_agent_aliases):
             return False
-        if str(entry.get("type") or "").strip() in {"result", "source_update_result", "source_baseline_update"}:
+        if str(entry.get("type") or "").strip() == "source_baseline_update":
+            return True
+        if str(entry.get("type") or "").strip() in {"result", "source_update_result"}:
             return False
         target = entry.get("to")
         if target is None:
@@ -1786,6 +1796,114 @@ class TelegramCodexOperator:
             "I will not implement this automatically. Reply with `Go` if you want me to proceed."
         )
 
+    def _source_update_payload(self, entry: dict[str, Any]) -> dict[str, Any]:
+        body = entry.get("body")
+        if isinstance(body, dict):
+            return body
+        return {"purpose": str(body or "").strip()}
+
+    def _source_update_id(self, entry: dict[str, Any]) -> str:
+        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
+
+    def _format_source_update_card(self, entry: dict[str, Any]) -> str:
+        body = self._source_update_payload(entry)
+        purpose = str(body.get("purpose") or "").strip() or "No purpose provided."
+        if len(purpose) > 900:
+            purpose = purpose[:897].rstrip() + "..."
+        lines = [
+            "Source update available.",
+            f"Repo: {body.get('repo_id') or 'unknown'}",
+            f"Branch: {body.get('branch') or 'unknown'}",
+            f"Commit: {body.get('commit') or 'unknown'}",
+            f"Action: {body.get('action_for_supervisors') or 'unspecified'}",
+            "",
+            purpose,
+            "",
+            "Choose Update now only if you want this supervisor to adopt the accepted baseline.",
+        ]
+        return "\n".join(lines)
+
+    def _format_source_update_details(self, entry: dict[str, Any]) -> str:
+        body = self._source_update_payload(entry)
+        details = json.dumps(body, ensure_ascii=False, indent=2)
+        if len(details) > 3000:
+            details = details[:2997].rstrip() + "..."
+        return f"Source update details:\n{details}"
+
+    def _mark_source_update_choice(self, source_update_id: str, choice: str) -> None:
+        state = self._load_board_state()
+        choices = state.setdefault("source_update_choices", {})
+        choices[source_update_id] = {"choice": choice, "time": utc_now()}
+        self._save_board_state(state)
+
+    def _validate_source_update_for_pull(self, pending: PendingSourceUpdate) -> tuple[bool, str, dict[str, Any]]:
+        body = self._source_update_payload(pending.entry)
+        repo_id = str(body.get("repo_id") or "").strip()
+        branch = str(body.get("branch") or "").strip()
+        commit = str(body.get("commit") or "").strip()
+        contributor = str(body.get("contributor") or "").strip()
+        reviewer = str(body.get("reviewer") or "").strip()
+        if repo_id and repo_id != "agent-system":
+            return False, f"Unsupported repo: {repo_id}", body
+        if not branch:
+            return False, "Board entry has no branch.", body
+        if not commit:
+            return False, "Board entry has no commit.", body
+        if not contributor or not reviewer:
+            return False, "Board entry has no contributor/reviewer metadata.", body
+        if contributor == reviewer:
+            return False, "Contributor and reviewer are the same.", body
+        if self._git_dirty():
+            return False, "Local worktree is not clean.", body
+        return True, "ok", body
+
+    def _pull_source_update(self, pending: PendingSourceUpdate) -> str:
+        ok, reason, body = self._validate_source_update_for_pull(pending)
+        if not ok:
+            return f"Update blocked: {reason}"
+        branch = str(body.get("branch") or "main").strip()
+        commit = str(body.get("commit") or "").strip()
+        fetch = self._git_command(["fetch", "pi-mirror", branch])
+        if fetch.returncode != 0:
+            return "Update blocked: git fetch failed: " + (fetch.stderr or fetch.stdout).strip()
+        current = self._git_command(["rev-parse", "--short", "HEAD"])
+        if current.returncode == 0 and current.stdout.strip() == commit[: len(current.stdout.strip())]:
+            return f"Already current at {current.stdout.strip()}."
+        merge = self._git_command(["merge", "--ff-only", commit])
+        if merge.returncode != 0:
+            return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
+        return f"Updated local source to {commit[:7]}. Restart the operator to run the new code."
+
+    async def _send_source_update_card(
+        self,
+        application: Application,
+        chat_id: int,
+        entry: dict[str, Any],
+    ) -> None:
+        source_update_id = self._source_update_id(entry)
+        self.pending_source_updates[source_update_id] = PendingSourceUpdate(
+            chat_id=chat_id,
+            entry=entry,
+            created_at=utc_now(),
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Update now", callback_data=f"source:update:{source_update_id}"),
+                    InlineKeyboardButton("Later", callback_data=f"source:later:{source_update_id}"),
+                ],
+                [
+                    InlineKeyboardButton("Decline", callback_data=f"source:decline:{source_update_id}"),
+                    InlineKeyboardButton("Details", callback_data=f"source:details:{source_update_id}"),
+                ],
+            ]
+        )
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=self._format_source_update_card(entry)[:3900],
+            reply_markup=keyboard,
+        )
+
     async def board_poll_loop(self, application: Application) -> None:
         available, detail = self._board_available()
         if not available:
@@ -1812,10 +1930,13 @@ class TelegramCodexOperator:
                         state["seen"] = list(seen.union(current_ids))
                         await asyncio.to_thread(self._save_board_state, state)
                         for entry in new_relevant:
-                            text = self._format_board_notice(entry)
                             for chat_id in self.config.allowed_chat_ids:
                                 try:
-                                    await application.bot.send_message(chat_id=chat_id, text=text)
+                                    if str(entry.get("type") or "").strip() == "source_baseline_update":
+                                        await self._send_source_update_card(application, chat_id, entry)
+                                    else:
+                                        text = self._format_board_notice(entry)
+                                        await application.bot.send_message(chat_id=chat_id, text=text)
                                 except Exception:
                                     LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
                     elif current_ids:
@@ -2872,6 +2993,81 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
         asyncio.create_task(self._run_approved_pending(context, pending))
 
+    async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+        message = query.message
+        chat_id = None
+        if message and getattr(message, "chat", None):
+            chat_id = message.chat.id
+        elif update.effective_chat:
+            chat_id = update.effective_chat.id
+        if chat_id is None:
+            await query.answer("Could not identify this chat.", show_alert=True)
+            return
+        if not self._authorized(chat_id):
+            await query.answer("Unauthorized chat.", show_alert=True)
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) != 3 or parts[0] != "source":
+            await query.answer()
+            return
+        action, source_update_id = parts[1], parts[2]
+        self._record_callback(update, f"source_{action}", source_update_id)
+        pending = self.pending_source_updates.get(source_update_id)
+        if pending is None:
+            await query.answer("This source update is no longer pending.", show_alert=True)
+            return
+        if pending.chat_id != chat_id:
+            await query.answer("This update belongs to a different chat.", show_alert=True)
+            return
+
+        if action == "details":
+            await query.answer("Details sent.")
+            await self._send_text_message(
+                context,
+                chat_id,
+                self._format_source_update_details(pending.entry),
+                event_type="source_update_details",
+                metadata={"source_update_id": source_update_id},
+            )
+            return
+        if action == "later":
+            self._mark_source_update_choice(source_update_id, "later")
+            await query.answer("Deferred.")
+            if message:
+                await query.edit_message_text("Source update deferred for this supervisor.")
+            return
+        if action == "decline":
+            self._mark_source_update_choice(source_update_id, "declined")
+            self.pending_source_updates.pop(source_update_id, None)
+            await query.answer("Declined.")
+            if message:
+                await query.edit_message_text("Source update declined for this supervisor.")
+            return
+        if action != "update":
+            await query.answer("Unknown action.", show_alert=True)
+            return
+
+        result = await asyncio.to_thread(self._pull_source_update, pending)
+        self._mark_source_update_choice(source_update_id, "update_now")
+        self.pending_source_updates.pop(source_update_id, None)
+        await query.answer("Update check finished.")
+        await self._send_text_message(
+            context,
+            chat_id,
+            result,
+            event_type="source_update_result",
+            metadata={"source_update_id": source_update_id},
+        )
+        if message:
+            try:
+                await query.edit_message_text(result[:3900])
+            except Exception:
+                LOGGER.exception("Failed to edit source update card chat_id=%s", chat_id)
+
     async def _run_approved_pending(self, context: ContextTypes.DEFAULT_TYPE, pending: PendingApproval) -> None:
         class ApprovalUser:
             id = 0
@@ -2984,6 +3180,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
+    application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
     application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))
