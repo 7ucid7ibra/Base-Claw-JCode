@@ -367,6 +367,13 @@ class PendingSourceUpdate:
     created_at: str
 
 
+@dataclass
+class PendingBoardEntry:
+    chat_id: int
+    entry: dict[str, Any]
+    created_at: str
+
+
 class StateStore:
     def __init__(self, path: Path):
         self.path = path
@@ -1284,6 +1291,7 @@ class TelegramCodexOperator:
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
         self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
+        self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
 
     def _lock_for(self, chat_id: int) -> asyncio.Lock:
@@ -1733,6 +1741,9 @@ class TelegramCodexOperator:
     def _board_entry_id(self, raw_line: str) -> str:
         return hashlib.sha256(raw_line.encode("utf-8", errors="replace")).hexdigest()
 
+    def _board_callback_id(self, entry: dict[str, Any]) -> str:
+        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
+
     def _fetch_board_entries(self) -> list[dict[str, Any]]:
         available, detail = self._board_available()
         if not available:
@@ -1793,7 +1804,78 @@ class TelegramCodexOperator:
             f"Task: {entry.get('task_id', 'none')}\n"
             f"Status: {entry.get('status', 'none')}\n\n"
             f"{body_text}\n\n"
-            "I will not implement this automatically. Reply with `Go` if you want me to proceed."
+            "Use the buttons below so the action stays tied to this exact board entry."
+        )
+
+    def _format_board_entry_details(self, entry: dict[str, Any]) -> str:
+        details = json.dumps(
+            {key: value for key, value in entry.items() if key != "_entry_id"},
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(details) > 3000:
+            details = details[:2997].rstrip() + "..."
+        return f"Board entry details:\n{details}"
+
+    def _mark_board_entry_choice(self, board_entry_id: str, choice: str) -> None:
+        state = self._load_board_state()
+        choices = state.setdefault("board_entry_choices", {})
+        choices[board_entry_id] = {"choice": choice, "time": utc_now()}
+        self._save_board_state(state)
+
+    async def _send_board_entry_card(
+        self,
+        application: Application,
+        chat_id: int,
+        entry: dict[str, Any],
+    ) -> None:
+        board_entry_id = self._board_callback_id(entry)
+        self.pending_board_entries[board_entry_id] = PendingBoardEntry(
+            chat_id=chat_id,
+            entry=entry,
+            created_at=utc_now(),
+        )
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Proceed", callback_data=f"board:proceed:{board_entry_id}"),
+                    InlineKeyboardButton("Later", callback_data=f"board:later:{board_entry_id}"),
+                ],
+                [
+                    InlineKeyboardButton("Details", callback_data=f"board:details:{board_entry_id}"),
+                    InlineKeyboardButton("Dismiss", callback_data=f"board:dismiss:{board_entry_id}"),
+                ],
+            ]
+        )
+        await application.bot.send_message(
+            chat_id=chat_id,
+            text=self._format_board_notice(entry)[:3900],
+            reply_markup=keyboard,
+        )
+
+    def _build_board_entry_prompt(self, entry: dict[str, Any]) -> str:
+        body = entry.get("body")
+        body_text = json.dumps(body, ensure_ascii=False, indent=2) if isinstance(body, dict) else str(body or "")
+        meta = entry.get("meta")
+        meta_text = json.dumps(meta, ensure_ascii=False, indent=2) if isinstance(meta, dict) else str(meta or "")
+        return "\n\n".join(
+            [
+                "Handle the following Raspberry Pi board entry.",
+                "The user clicked the inline Proceed button for this exact entry.",
+                "Do not treat unrelated recent chat context as approval for a different board item.",
+                "If this is a source update candidate, review it according to SOURCE_CONTRIBUTION_REVIEW.md and report a result. Do not silently promote it to baseline.",
+                "If this is an implementation task, keep the work bounded to the board entry and report blockers clearly.",
+                f"From: {entry.get('agent', 'unknown')}",
+                f"Type: {entry.get('type', 'unknown')}",
+                f"To: {entry.get('to', 'unknown')}",
+                f"Thread: {entry.get('thread_id', 'none')}",
+                f"Task: {entry.get('task_id', 'none')}",
+                f"Status: {entry.get('status', 'none')}",
+                "Body:",
+                body_text,
+                "Meta:",
+                meta_text,
+            ]
         )
 
     def _source_update_payload(self, entry: dict[str, Any]) -> dict[str, Any]:
@@ -1935,8 +2017,7 @@ class TelegramCodexOperator:
                                     if str(entry.get("type") or "").strip() == "source_baseline_update":
                                         await self._send_source_update_card(application, chat_id, entry)
                                     else:
-                                        text = self._format_board_notice(entry)
-                                        await application.bot.send_message(chat_id=chat_id, text=text)
+                                        await self._send_board_entry_card(application, chat_id, entry)
                                 except Exception:
                                     LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
                     elif current_ids:
@@ -3068,6 +3149,83 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             except Exception:
                 LOGGER.exception("Failed to edit source update card chat_id=%s", chat_id)
 
+    async def on_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.data:
+            return
+        message = query.message
+        chat_id = None
+        if message and getattr(message, "chat", None):
+            chat_id = message.chat.id
+        elif update.effective_chat:
+            chat_id = update.effective_chat.id
+        if chat_id is None:
+            await query.answer("Could not identify this chat.", show_alert=True)
+            return
+        if not self._authorized(chat_id):
+            await query.answer("Unauthorized chat.", show_alert=True)
+            return
+
+        parts = query.data.split(":", 2)
+        if len(parts) != 3 or parts[0] != "board":
+            await query.answer()
+            return
+        action, board_entry_id = parts[1], parts[2]
+        self._record_callback(update, f"board_{action}", board_entry_id)
+        pending = self.pending_board_entries.get(board_entry_id)
+        if pending is None:
+            await query.answer("This board entry is no longer pending.", show_alert=True)
+            return
+        if pending.chat_id != chat_id:
+            await query.answer("This board entry belongs to a different chat.", show_alert=True)
+            return
+
+        if action == "details":
+            await query.answer("Details sent.")
+            await self._send_text_message(
+                context,
+                chat_id,
+                self._format_board_entry_details(pending.entry),
+                event_type="board_entry_details",
+                metadata={"board_entry_id": board_entry_id},
+            )
+            return
+        if action == "later":
+            self._mark_board_entry_choice(board_entry_id, "later")
+            await query.answer("Deferred.")
+            if message:
+                await query.edit_message_text("Board entry deferred for this supervisor.")
+            return
+        if action == "dismiss":
+            self._mark_board_entry_choice(board_entry_id, "dismissed")
+            self.pending_board_entries.pop(board_entry_id, None)
+            await query.answer("Dismissed.")
+            if message:
+                await query.edit_message_text("Board entry dismissed for this supervisor.")
+            return
+        if action != "proceed":
+            await query.answer("Unknown action.", show_alert=True)
+            return
+
+        self._mark_board_entry_choice(board_entry_id, "proceed")
+        self.pending_board_entries.pop(board_entry_id, None)
+        await query.answer("Proceeding.")
+        if message:
+            try:
+                await query.edit_message_text("Proceeding with this board entry.")
+            except Exception:
+                LOGGER.exception("Failed to edit board entry card chat_id=%s", chat_id)
+        prompt = self._build_board_entry_prompt(pending.entry)
+        asyncio.create_task(
+            self._process_user_message(
+                update,
+                context,
+                prompt,
+                transcript=None,
+                approved_proposal="User clicked Proceed on a Raspberry Pi board entry inline keyboard.",
+            )
+        )
+
     async def _run_approved_pending(self, context: ContextTypes.DEFAULT_TYPE, pending: PendingApproval) -> None:
         class ApprovalUser:
             id = 0
@@ -3181,6 +3339,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
     application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
+    application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
     application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))
