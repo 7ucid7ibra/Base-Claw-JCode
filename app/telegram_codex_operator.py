@@ -4560,7 +4560,7 @@ async def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, operator.on_text))
     await application.initialize()
     await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)
+    await application.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
     board_task = asyncio.create_task(operator.board_poll_loop(application))
     history_sync_task = asyncio.create_task(operator.history_auto_sync_loop())
     if config.startup_notice:
