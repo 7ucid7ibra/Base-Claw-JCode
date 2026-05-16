@@ -2885,29 +2885,35 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             message_type="command",
             text=update.effective_message.text if update.effective_message else "/reset",
         )
-        self.state.clear_session_id(chat_id)
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        await self._send_reset_confirmation(context, chat_id)
+
+    async def _send_reset_confirmation(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Yes, reset session", callback_data="reset:confirm"),
+                    InlineKeyboardButton("Cancel", callback_data="reset:cancel"),
+                ]
+            ]
+        )
         await self._send_text_message(
             context,
             chat_id,
-            "Cleared the persisted Codex session for this chat.",
-            event_type="command_reset_reply",
+            "Reset clears this chat's persisted Codex session. Are you sure?",
+            event_type="command_reset_confirm",
+            reply_markup=keyboard,
         )
-        await self._send_voice_reply(context, chat_id, "I cleared the persisted Codex session for this chat.")
 
-    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_status",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/status",
-        )
+    def _status_text(self, chat_id: int) -> str:
         session_id = self.state.get_session_id(chat_id)
         try:
             codex_status = f"available at {codex_executable()}"
         except RuntimeError as exc:
             codex_status = str(exc)
-        text = (
+        return (
             f"Provider: {self.config.agent_provider}\n"
             f"Workdir: {self.config.workdir}\n"
             f"Session: {session_id or 'none'}\n"
@@ -2921,6 +2927,16 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}\n"
             f"History auto-sync: {'on' if self.config.history_auto_sync_enabled else 'off'}"
         )
+
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_status",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/status",
+        )
+        text = self._status_text(chat_id)
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
 
@@ -2935,27 +2951,35 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
-        text = "\n".join(
+        await self._send_help_menu(context, chat_id)
+
+    async def _send_help_menu(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+        keyboard = InlineKeyboardMarkup(
             [
-                "Available commands:",
-                "/status - show provider, model, safety mode, voice, board, and history state.",
-                "/voice - choose the Kokoro voice.",
-                "/voice_status - show whether voice replies are enabled.",
-                "/voice_on - enable voice note replies after this command.",
-                "/voice_off - disable voice note replies and use text replies.",
-                "/history_status - show local and synced message counts.",
-                "/history_sync - force an immediate sync to the Raspberry Pi.",
-                "/board_poll_status - show Raspberry Pi board polling state.",
-                "/board_poll_on - enable future board polling.",
-                "/board_poll_off - disable future board polling.",
-                "/restart - restart this operator through the supervisor.",
-                "/reset - clear this chat's persisted Codex session.",
-                "",
-                "Board behavior:",
-                "When you ask one supervisor to tell another something, the sender should write a targeted Raspberry Pi board entry. The recipient can notice it and decide what to do without relying on vague chat context.",
+                [
+                    InlineKeyboardButton("Status", callback_data="menu:status"),
+                    InlineKeyboardButton("Voice", callback_data="menu:voice"),
+                ],
+                [
+                    InlineKeyboardButton("History status", callback_data="menu:history_status"),
+                    InlineKeyboardButton("Sync history", callback_data="menu:history_sync"),
+                ],
+                [
+                    InlineKeyboardButton("Board status", callback_data="menu:board_status"),
+                    InlineKeyboardButton("Voice status", callback_data="menu:voice_status"),
+                ],
+                [
+                    InlineKeyboardButton("Restart", callback_data="menu:restart"),
+                    InlineKeyboardButton("Reset session", callback_data="menu:reset"),
+                ],
             ]
         )
-        await self._send_text_message(context, chat_id, text, event_type="command_help_reply")
+        text = (
+            "BaseClaw help menu.\n"
+            "Use the buttons below for common operator actions.\n\n"
+            "Board behavior: supervisor-to-supervisor messages should go through targeted Raspberry Pi board entries, so the recipient can handle them with the right context."
+        )
+        await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
 
     def _available_voices(self) -> list[str]:
         voices: list[str] = []
@@ -2991,6 +3015,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
+        await self._send_voice_menu(context, chat_id)
+
+    async def _send_voice_menu(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
         voices = await asyncio.to_thread(self._available_voices)
         if not voices:
             await self._send_text_message(
@@ -3111,9 +3138,13 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
 
+        text = await self._history_status_text()
+        await self._send_text_message(context, chat_id, text, event_type="command_history_status_reply")
+
+    async def _history_status_text(self) -> str:
         status = await asyncio.to_thread(self.message_store.history_sync_status)
         available, detail = self._history_sync_available()
-        text = (
+        return (
             "History sync status\n"
             f"Agent: {self.config.history_agent_name}\n"
             f"Device: {self.config.history_device_name}\n"
@@ -3126,7 +3157,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Last synced: {status['last_synced'] or 'never'}\n"
             f"Last error: {status['last_error'] or 'none'}"
         )
-        await self._send_text_message(context, chat_id, text, event_type="command_history_status_reply")
 
     async def history_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -3142,14 +3172,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
         keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
         try:
-            result = await asyncio.to_thread(self._sync_history_to_pi)
-            text = (
-                "History sync complete\n"
-                f"Selected: {result.get('selected', 0)}\n"
-                f"Inserted: {result.get('inserted', 0)}\n"
-                f"Skipped duplicates: {result.get('skipped', 0)}\n"
-                f"Remote DB: {result.get('remote_db', self.config.history_remote_db_path)}"
-            )
+            text = await self._history_sync_text()
             event_type = "command_history_sync_reply"
         except Exception as exc:
             LOGGER.exception("History sync failed chat_id=%s", chat_id)
@@ -3158,6 +3181,16 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         finally:
             await self._stop_keepalive(keepalive)
         await self._send_text_message(context, chat_id, text, event_type=event_type)
+
+    async def _history_sync_text(self) -> str:
+        result = await asyncio.to_thread(self._sync_history_to_pi)
+        return (
+            "History sync complete\n"
+            f"Selected: {result.get('selected', 0)}\n"
+            f"Inserted: {result.get('inserted', 0)}\n"
+            f"Skipped duplicates: {result.get('skipped', 0)}\n"
+            f"Remote DB: {result.get('remote_db', self.config.history_remote_db_path)}"
+        )
 
     async def board_poll_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -3939,6 +3972,88 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
         asyncio.create_task(self._run_approved_pending(context, pending))
 
+    async def on_reset_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.message:
+            return
+        chat_id = query.message.chat_id
+        action = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+        self._record_callback(update, f"reset_{action}", None)
+        if not self._authorized(chat_id):
+            await query.answer("Unauthorized chat.", show_alert=True)
+            return
+        if action == "cancel":
+            await query.answer("Cancelled.")
+            await query.edit_message_text("Reset cancelled.")
+            return
+        if action != "confirm":
+            await query.answer("Unknown reset action.", show_alert=True)
+            return
+        self.state.clear_session_id(chat_id)
+        await query.answer("Session reset.")
+        await query.edit_message_text("Cleared the persisted Codex session for this chat.")
+
+    async def on_menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.message:
+            return
+        chat_id = query.message.chat_id
+        action = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+        self._record_callback(update, f"menu_{action}", None)
+        if not self._authorized(chat_id):
+            await query.answer("Unauthorized chat.", show_alert=True)
+            return
+        await query.answer()
+        if action == "status":
+            await self._send_text_message(context, chat_id, self._status_text(chat_id), event_type="menu_status_reply")
+            return
+        if action == "voice":
+            await self._send_voice_menu(context, chat_id)
+            return
+        if action == "history_status":
+            await self._send_text_message(context, chat_id, await self._history_status_text(), event_type="menu_history_status_reply")
+            return
+        if action == "history_sync":
+            try:
+                text = await self._history_sync_text()
+            except Exception as exc:
+                LOGGER.exception("Menu history sync failed chat_id=%s", chat_id)
+                text = f"History sync failed: {exc}"
+            await self._send_text_message(context, chat_id, text, event_type="menu_history_sync_reply")
+            return
+        if action == "board_status":
+            await self._send_text_message(
+                context,
+                chat_id,
+                (
+                    f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
+                    f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
+                    f"Board: {self.config.board_remote} {self.config.board_path}"
+                ),
+                event_type="menu_board_status_reply",
+            )
+            return
+        if action == "voice_status":
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Voice replies are {'enabled' if self.config.voice_replies_enabled else 'disabled'}. Current voice: {self.config.kokoro_voice}.",
+                event_type="menu_voice_status_reply",
+            )
+            return
+        if action == "restart":
+            await self._send_text_message(
+                context,
+                chat_id,
+                "Use /restart to restart the operator. I keep restart as a command so it is not triggered by an accidental help-menu tap.",
+                event_type="menu_restart_notice",
+            )
+            return
+        if action == "reset":
+            await self._send_reset_confirmation(context, chat_id)
+            return
+        await self._send_text_message(context, chat_id, "Unknown help menu action.", event_type="menu_unknown_action")
+
     async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             await self._handle_source_update_callback(update, context)
@@ -4284,6 +4399,8 @@ async def main() -> None:
     application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
+    application.add_handler(CallbackQueryHandler(operator.on_menu_callback, pattern=r"^menu:"))
+    application.add_handler(CallbackQueryHandler(operator.on_reset_callback, pattern=r"^reset:"))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
     application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
     application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
