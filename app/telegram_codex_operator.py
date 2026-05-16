@@ -3261,16 +3261,39 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
+        await self._send_board_poll_status(context, chat_id, event_type="command_board_poll_status_reply")
+
+    def _board_poll_status_text(self) -> str:
+        return (
+            f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
+            f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
+            f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
+            f"Board: {self.config.board_remote} {self.config.board_path}"
+        )
+
+    def _board_poll_controls(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Board polling on", callback_data="menu:board_poll_on"),
+                    InlineKeyboardButton("Board polling off", callback_data="menu:board_poll_off"),
+                ]
+            ]
+        )
+
+    async def _send_board_poll_status(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        *,
+        event_type: str,
+    ) -> None:
         await self._send_text_message(
             context,
             chat_id,
-            (
-                f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
-                f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
-                f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
-                f"Board: {self.config.board_remote} {self.config.board_path}"
-            ),
-            event_type="command_board_poll_status_reply",
+            self._board_poll_status_text(),
+            event_type=event_type,
+            reply_markup=self._board_poll_controls(),
         )
 
     async def board_poll_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3290,6 +3313,15 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
+        restart_note = await self._set_board_poll_enabled(enabled)
+        await self._send_text_message(
+            context,
+            chat_id,
+            f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
+            event_type="command_board_poll_toggle_reply",
+        )
+
+    async def _set_board_poll_enabled(self, enabled: bool) -> str:
         was_enabled = self.config.board_poll_enabled
         self.config.board_poll_enabled = enabled
         await asyncio.to_thread(
@@ -3305,12 +3337,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             restart_note = "This disables future polling checks in the running process and is saved for restart."
         elif not was_enabled and enabled and self.board_poll_loop_active:
             restart_note = "This enables polling in the running process; the loop will check again on its next interval."
-        await self._send_text_message(
-            context,
-            chat_id,
-            f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
-            event_type="command_board_poll_toggle_reply",
-        )
+        return restart_note
 
     async def update_from_pi(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -4120,16 +4147,17 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await self._send_text_message(context, chat_id, text, event_type="menu_history_sync_reply")
             return
         if action == "board_status":
+            await self._send_board_poll_status(context, chat_id, event_type="menu_board_status_reply")
+            return
+        if action in {"board_poll_on", "board_poll_off"}:
+            enabled = action == "board_poll_on"
+            restart_note = await self._set_board_poll_enabled(enabled)
             await self._send_text_message(
                 context,
                 chat_id,
-                (
-                    f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
-                    f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
-                    f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
-                    f"Board: {self.config.board_remote} {self.config.board_path}"
-                ),
-                event_type="menu_board_status_reply",
+                f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}\n\n{self._board_poll_status_text()}",
+                event_type="menu_board_poll_toggle_reply",
+                reply_markup=self._board_poll_controls(),
             )
             return
         if action == "voice_status":
