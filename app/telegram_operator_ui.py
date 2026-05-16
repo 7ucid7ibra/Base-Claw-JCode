@@ -64,6 +64,8 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_HISTORY_SSH_KEY",
     "TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS",
     "TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT",
+    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED",
+    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS",
     "TELEGRAM_OPERATOR_BOARD_POLL_ENABLED",
     "TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS",
     "TELEGRAM_OPERATOR_BOARD_REMOTE",
@@ -75,6 +77,7 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL",
     "TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS",
+    "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED",
 ]
 
 DEFAULTS = {
@@ -112,6 +115,8 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_HISTORY_SSH_KEY": "",
     "TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS": "",
     "TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT": "250",
+    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED": "true",
+    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS": "300",
     "TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true",
     "TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS": "180",
     "TELEGRAM_OPERATOR_BOARD_REMOTE": "",
@@ -123,6 +128,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL": "http://127.0.0.1:1234/v1",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL": "",
     "TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS": "180",
+    "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED": "true",
 }
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
@@ -516,6 +522,7 @@ class OperatorUi(ctk.CTk):
             border_width=1,
         )
         self.whisper_combo.grid(row=1, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+        self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=3)
 
         runtime = self._card(body, "Runtime", "Start, stop, and keep an eye on the bridge.", 3, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
@@ -551,8 +558,9 @@ class OperatorUi(ctk.CTk):
             hover_color="#5B8066",
             command=self.save,
         ).grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self._switch(runtime, "Raspberry Pi board polling enabled", "TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", row=2)
         self.status_detail = ctk.CTkLabel(runtime, text="Status: checking...", text_color="#A8B3BD", anchor="w")
-        self.status_detail.grid(row=2, column=0, sticky="ew")
+        self.status_detail.grid(row=3, column=0, sticky="ew")
 
         logs = self._card(body, "Recent Log", "Latest bridge activity.", 4, 0)
         logs.grid_rowconfigure(0, weight=1)

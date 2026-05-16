@@ -356,6 +356,8 @@ class OperatorConfig:
     history_ssh_key_path: Path
     history_known_hosts_path: Path
     history_sync_limit: int
+    history_auto_sync_enabled: bool
+    history_auto_sync_interval_seconds: int
     board_poll_enabled: bool
     board_poll_interval_seconds: int
     board_remote: str
@@ -370,6 +372,7 @@ class OperatorConfig:
     local_vision_base_url: str
     local_vision_model: str
     local_vision_timeout_seconds: int
+    voice_replies_enabled: bool
 
 
 @dataclass
@@ -2399,6 +2402,9 @@ class TelegramCodexOperator:
             LOGGER.info("Board polling not active: %s", detail)
             return
         while True:
+            if not self.config.board_poll_enabled:
+                await asyncio.sleep(self.config.board_poll_interval_seconds)
+                continue
             try:
                 entries = await asyncio.to_thread(self._fetch_board_entries)
                 state = await asyncio.to_thread(self._load_board_state)
@@ -2442,6 +2448,33 @@ class TelegramCodexOperator:
             except Exception as exc:
                 LOGGER.warning("Board polling failed: %s", exc)
             await asyncio.sleep(self.config.board_poll_interval_seconds)
+
+    async def history_auto_sync_loop(self) -> None:
+        if not self.config.history_auto_sync_enabled:
+            LOGGER.info("History auto-sync not active: disabled")
+            return
+        while True:
+            try:
+                available, detail = self._history_sync_available()
+                if not available:
+                    LOGGER.warning("History auto-sync skipped: %s", detail)
+                else:
+                    result = await asyncio.to_thread(self._sync_history_to_pi)
+                    selected = int(result.get("selected", 0) or 0)
+                    inserted = int(result.get("inserted", 0) or 0)
+                    skipped = int(result.get("skipped", 0) or 0)
+                    if selected:
+                        LOGGER.info(
+                            "History auto-sync complete selected=%s inserted=%s skipped=%s",
+                            selected,
+                            inserted,
+                            skipped,
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("History auto-sync failed; will retry later: %s", exc)
+            await asyncio.sleep(self.config.history_auto_sync_interval_seconds)
 
     def _sync_history_to_pi(self) -> dict[str, Any]:
         available, detail = self._history_sync_available()
@@ -2595,6 +2628,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         return summary
 
     async def _send_voice_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+        if not self.config.voice_replies_enabled:
+            return
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
             ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, Path(tmp))
             caption = text if len(text) <= 900 else text[:897].rstrip() + "..."
@@ -2628,6 +2663,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         *,
         always_send_text: bool = False,
     ) -> None:
+        if not self.config.voice_replies_enabled:
+            await self._send_text_chunks(context, chat_id, text)
+            return
         try:
             await self._send_voice_reply(context, chat_id, text)
         except Exception as exc:
@@ -2878,11 +2916,46 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Voice: {self.config.kokoro_voice}\n"
             f"Whisper model: {self.config.whisper_model_name}\n"
             f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
+            f"Voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
             f"Local speech fallback: {self.config.local_speech_fallback}\n"
-            f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}"
+            f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}\n"
+            f"History auto-sync: {'on' if self.config.history_auto_sync_enabled else 'off'}"
         )
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_help",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/help",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        text = "\n".join(
+            [
+                "Available commands:",
+                "/status - show provider, model, safety mode, voice, board, and history state.",
+                "/voice - choose the Kokoro voice.",
+                "/voice_status - show whether voice replies are enabled.",
+                "/voice_on - enable voice note replies after this command.",
+                "/voice_off - disable voice note replies and use text replies.",
+                "/history_status - show local and synced message counts.",
+                "/history_sync - force an immediate sync to the Raspberry Pi.",
+                "/board_poll_status - show Raspberry Pi board polling state.",
+                "/board_poll_on - enable future board polling.",
+                "/board_poll_off - disable future board polling.",
+                "/restart - restart this operator through the supervisor.",
+                "/reset - clear this chat's persisted Codex session.",
+                "",
+                "Board behavior:",
+                "When you ask one supervisor to tell another something, the sender should write a targeted Raspberry Pi board entry. The recipient can notice it and decide what to do without relying on vague chat context.",
+            ]
+        )
+        await self._send_text_message(context, chat_id, text, event_type="command_help_reply")
 
     def _available_voices(self) -> list[str]:
         voices: list[str] = []
@@ -2982,6 +3055,50 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await query.edit_message_text(f"Voice changed to {voice}.\nLanguage code: {lang_code}")
         await self._send_voice_reply(context, chat_id, f"Voice changed to {voice}.")
 
+    async def voice_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_voice_status",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/voice_status",
+        )
+        await self._send_text_message(
+            context,
+            chat_id,
+            f"Voice replies are {'enabled' if self.config.voice_replies_enabled else 'disabled'}. Current voice: {self.config.kokoro_voice}.",
+            event_type="command_voice_status_reply",
+        )
+
+    async def voice_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_voice_replies(update, context, enabled=True)
+
+    async def voice_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_voice_replies(update, context, enabled=False)
+
+    async def _set_voice_replies(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_voice_on" if enabled else "command_voice_off",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else ("/voice_on" if enabled else "/voice_off"),
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        self.config.voice_replies_enabled = enabled
+        await asyncio.to_thread(
+            update_operator_env,
+            {"TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED": "true" if enabled else "false"},
+        )
+        await self._send_text_message(
+            context,
+            chat_id,
+            f"Voice replies {'enabled' if enabled else 'disabled'}. This is active now and saved for restart.",
+            event_type="command_voice_toggle_reply",
+        )
+
     async def history_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
         self._record_incoming_message(
@@ -3041,6 +3158,58 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         finally:
             await self._stop_keepalive(keepalive)
         await self._send_text_message(context, chat_id, text, event_type=event_type)
+
+    async def board_poll_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_board_poll_status",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/board_poll_status",
+        )
+        await self._send_text_message(
+            context,
+            chat_id,
+            (
+                f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
+                f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
+                f"Board: {self.config.board_remote} {self.config.board_path}"
+            ),
+            event_type="command_board_poll_status_reply",
+        )
+
+    async def board_poll_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_board_poll(update, context, enabled=True)
+
+    async def board_poll_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._set_board_poll(update, context, enabled=False)
+
+    async def _set_board_poll(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_board_poll_on" if enabled else "command_board_poll_off",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else ("/board_poll_on" if enabled else "/board_poll_off"),
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        was_enabled = self.config.board_poll_enabled
+        self.config.board_poll_enabled = enabled
+        await asyncio.to_thread(
+            update_operator_env,
+            {"TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true" if enabled else "false"},
+        )
+        restart_note = "Restart is recommended so the background polling task matches the saved setting."
+        if was_enabled and not enabled:
+            restart_note = "This disables future polling checks in the running process and is saved for restart."
+        await self._send_text_message(
+            context,
+            chat_id,
+            f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
+            event_type="command_board_poll_toggle_reply",
+        )
 
     def _spawn_replacement_operator(self) -> subprocess.Popen:
         script_path = Path(__file__).resolve()
@@ -4056,6 +4225,11 @@ def load_config() -> OperatorConfig:
         history_ssh_key_path=history_ssh_key_path,
         history_known_hosts_path=history_known_hosts_path,
         history_sync_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT", ""), 250),
+        history_auto_sync_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED", ""), True),
+        history_auto_sync_interval_seconds=parse_positive_int(
+            os.environ.get("TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS", ""),
+            300,
+        ),
         board_poll_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", ""), True),
         board_poll_interval_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS", ""), 180),
         board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
@@ -4076,6 +4250,7 @@ def load_config() -> OperatorConfig:
             os.environ.get("TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS", ""),
             180,
         ),
+        voice_replies_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True),
     )
 
 
@@ -4095,11 +4270,18 @@ async def main() -> None:
     operator = TelegramCodexOperator(config)
     application = Application.builder().token(config.bot_token).concurrent_updates(True).build()
     application.add_handler(CommandHandler("start", operator.start))
+    application.add_handler(CommandHandler("help", operator.help_command))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
     application.add_handler(CommandHandler("voice", operator.voice_menu))
+    application.add_handler(CommandHandler("voice_status", operator.voice_status))
+    application.add_handler(CommandHandler("voice_on", operator.voice_on))
+    application.add_handler(CommandHandler("voice_off", operator.voice_off))
     application.add_handler(CommandHandler("history_status", operator.history_status))
     application.add_handler(CommandHandler("history_sync", operator.history_sync))
+    application.add_handler(CommandHandler("board_poll_status", operator.board_poll_status))
+    application.add_handler(CommandHandler("board_poll_on", operator.board_poll_on))
+    application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
@@ -4115,6 +4297,7 @@ async def main() -> None:
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
     board_task = asyncio.create_task(operator.board_poll_loop(application))
+    history_sync_task = asyncio.create_task(operator.history_auto_sync_loop())
     if config.startup_notice:
         for chat_id in config.allowed_chat_ids:
             try:
@@ -4133,8 +4316,13 @@ async def main() -> None:
         await asyncio.Event().wait()
     finally:
         board_task.cancel()
+        history_sync_task.cancel()
         try:
             await board_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await history_sync_task
         except asyncio.CancelledError:
             pass
         await application.updater.stop()
