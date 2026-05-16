@@ -6,12 +6,14 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import queue
 import re
 import shlex
 import secrets
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
@@ -344,6 +346,9 @@ class OperatorConfig:
     codex_model: str
     safety_mode: str
     safe_mode: bool
+    supervisor_id: str
+    supervisor_name: str
+    supervisor_role: str
     history_agent_name: str
     history_device_name: str
     history_remote: str
@@ -495,6 +500,15 @@ class SQLiteMessageStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_board_action_cards_chat ON board_action_cards(chat_id, card_type)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS supervisor_identity (
+                    identity_key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
 
     def append(
         self,
@@ -593,6 +607,41 @@ class SQLiteMessageStore:
             "recorded_at": row["recorded_at"],
             "metadata": metadata,
         }
+
+    def upsert_supervisor_identity(self, *, identity_key: str, value: dict[str, Any]) -> None:
+        payload = json.dumps(value, ensure_ascii=True, default=str)
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO supervisor_identity (identity_key, value_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(identity_key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (identity_key, payload, utc_now()),
+                )
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to store supervisor identity key=%s", identity_key)
+
+    def load_supervisor_identity(self, *, identity_key: str) -> Optional[dict[str, Any]]:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT value_json FROM supervisor_identity WHERE identity_key = ?",
+                    (identity_key,),
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to load supervisor identity key=%s", identity_key)
+            return None
+        if row is None:
+            return None
+        try:
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            LOGGER.exception("Stored supervisor identity is invalid JSON key=%s", identity_key)
+            return None
 
     def _eligible_history_where(self) -> str:
         return """
@@ -1403,6 +1452,7 @@ class TelegramCodexOperator:
         self.state = StateStore(config.state_path)
         self.memory_log = MemoryLog(config.memory_log_path)
         self.message_store = SQLiteMessageStore(config.sqlite_path)
+        self.identity = self._load_or_initialize_identity()
         self.transcriber = RemoteFirstWhisperTranscriber(config.whisper_urls, config.whisper_model_name)
         self.agent = build_agent_bridge(config)
         self.proposal_agent = CodexBridge(config.workdir, config.codex_model, min(config.agent_timeout_seconds, 180), "restricted")
@@ -1412,6 +1462,113 @@ class TelegramCodexOperator:
         self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
         self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
+
+    def _local_memory_gb(self) -> Optional[float]:
+        if platform.system().lower() != "windows":
+            return None
+        try:
+            import ctypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return None
+            return round(status.ullTotalPhys / (1024**3), 1)
+        except Exception:
+            return None
+
+    def _current_source_commit(self) -> Optional[str]:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(PROJECT_ROOT), "rev-parse", "--short", "HEAD"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                **hidden_subprocess_kwargs(),
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    def _build_identity_record(self) -> dict[str, Any]:
+        memory_gb = self._local_memory_gb()
+        return {
+            "supervisor_id": self.config.supervisor_id,
+            "display_name": self.config.supervisor_name,
+            "role": self.config.supervisor_role,
+            "team_slot": self.config.supervisor_id,
+            "role_source": "Raspberry Pi bootstrap: agent_bootstraps/maat.md, agents.json, device_registry.json",
+            "core_purpose": "Improve reliability through review, verification, consistency checking, and regression detection.",
+            "do_not": [
+                "Do not take over mission direction.",
+                "Do not claim to be BaseClaw when operating as Ma'at.",
+                "Do not review your own source update as an independent reviewer.",
+            ],
+            "machine": {
+                "hostname": socket.gethostname(),
+                "device_label": "12 GB RAM Windows laptop",
+                "os": platform.platform(),
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+                "cpu_count": os.cpu_count(),
+                "ram_gb": memory_gb,
+            },
+            "operator": {
+                "provider": self.config.agent_provider,
+                "workdir": str(self.config.workdir),
+                "repo": str(PROJECT_ROOT),
+                "source_commit": self._current_source_commit(),
+                "safety_mode": self.config.safety_mode,
+            },
+            "coordination": {
+                "history_agent_name": self.config.history_agent_name,
+                "history_device_name": self.config.history_device_name,
+                "board_remote": self.config.board_remote,
+                "board_path": self.config.board_path,
+                "board_aliases": self.config.board_agent_aliases,
+            },
+        }
+
+    def _load_or_initialize_identity(self) -> dict[str, Any]:
+        identity = self._build_identity_record()
+        self.message_store.upsert_supervisor_identity(identity_key="self", value=identity)
+        return self.message_store.load_supervisor_identity(identity_key="self") or identity
+
+    def _identity_prompt_block(self) -> str:
+        machine = self.identity.get("machine", {})
+        operator = self.identity.get("operator", {})
+        coordination = self.identity.get("coordination", {})
+        return "\n".join(
+            [
+                f"Supervisor identity: {self.identity.get('display_name')} ({self.identity.get('supervisor_id')})",
+                f"Role: {self.identity.get('role')}",
+                f"Core purpose: {self.identity.get('core_purpose')}",
+                f"Machine: {machine.get('hostname')} / {machine.get('device_label')} / {machine.get('os')}",
+                f"Specs: CPU count {machine.get('cpu_count')}, RAM {machine.get('ram_gb')} GB",
+                f"Source commit: {operator.get('source_commit')}",
+                f"Board aliases: {', '.join(coordination.get('board_aliases') or [])}",
+                "Identity rule: use this database identity for self-reference; do not infer identity from stale chat memory.",
+            ]
+        )
 
     def _lock_for(self, chat_id: int) -> asyncio.Lock:
         lock = self.chat_locks.get(chat_id)
@@ -2492,6 +2649,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             "Voice-friendly reply rule: prefer plain conversational text. Avoid decorative Markdown such as bold/italic markers unless necessary. Do not quote long file paths, long numbers, long commands, logs, or code blocks in normal spoken replies; summarize them and include only short labels or essential names. If exact paths, commands, or code are needed, put them after a short spoken summary and keep them minimal.",
             f"Telegram sender: {telegram_user}",
+            "Loaded supervisor identity:",
+            self._identity_prompt_block(),
         ]
         if transcript:
             parts.append("This message came from a Telegram voice note.")
@@ -3809,10 +3968,13 @@ def load_config() -> OperatorConfig:
         Path.home() / "Downloads" / "maat_pi_known_hosts",
     )
     history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
+    supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "maat-supervisor").strip() or "maat-supervisor"
+    supervisor_name = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_NAME", "Ma'at").strip() or "Ma'at"
+    supervisor_role = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ROLE", "critic").strip() or "critic"
     board_aliases = parse_csv_list(
         os.environ.get(
             "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
-            f"{history_agent_name},baseclaw,maat-supervisor,developer-agent",
+            f"{supervisor_id},{history_agent_name},baseclaw,maat-supervisor,developer-agent",
         )
     )
     return OperatorConfig(
@@ -3835,6 +3997,9 @@ def load_config() -> OperatorConfig:
         codex_model=os.environ.get("TELEGRAM_OPERATOR_CODEX_MODEL", ""),
         safety_mode=safety_mode,
         safe_mode=safety_mode != "full",
+        supervisor_id=supervisor_id,
+        supervisor_name=supervisor_name,
+        supervisor_role=supervisor_role,
         history_agent_name=history_agent_name,
         history_device_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", os.environ.get("COMPUTERNAME", "unknown-device")).strip() or "unknown-device",
         history_remote=history_remote,
