@@ -559,6 +559,41 @@ class SQLiteMessageStore:
         except (OSError, sqlite3.Error):
             LOGGER.exception("Failed to record Telegram message event_type=%s direction=%s", event_type, direction)
 
+    def find_by_telegram_message_id(self, *, chat_id: int, telegram_message_id: int) -> Optional[dict[str, Any]]:
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                row = connection.execute(
+                    """
+                    SELECT direction, event_type, message_type, text, transcript, recorded_at, metadata_json
+                    FROM telegram_messages
+                    WHERE chat_id = ? AND telegram_message_id = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (chat_id, telegram_message_id),
+                ).fetchone()
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to load Telegram reply context message_id=%s", telegram_message_id)
+            return None
+        if row is None:
+            return None
+        metadata: dict[str, Any] = {}
+        if row["metadata_json"]:
+            try:
+                metadata = json.loads(row["metadata_json"])
+            except json.JSONDecodeError:
+                metadata = {}
+        return {
+            "direction": row["direction"],
+            "event_type": row["event_type"],
+            "message_type": row["message_type"],
+            "text": row["text"],
+            "transcript": row["transcript"],
+            "recorded_at": row["recorded_at"],
+            "metadata": metadata,
+        }
+
     def _eligible_history_where(self) -> str:
         return """
             direction IN ('in', 'out')
@@ -1417,6 +1452,9 @@ class TelegramCodexOperator:
                 message_dict = message.to_dict()
             except Exception:
                 message_dict = {}
+        reply_to_message_id = None
+        if message and getattr(message, "reply_to_message", None):
+            reply_to_message_id = message.reply_to_message.message_id
         self.message_store.append(
             direction="in",
             event_type=event_type,
@@ -1426,8 +1464,61 @@ class TelegramCodexOperator:
             text=text,
             transcript=transcript,
             safe_mode=self.config.safe_mode,
-            metadata={"message": message_dict, **(metadata or {})},
+            metadata={"message": message_dict, "reply_to_message_id": reply_to_message_id, **(metadata or {})},
             **user_meta,
+        )
+
+    def _reply_context_for_update(self, update: Update, max_chars: int = 1600) -> Optional[str]:
+        message = update.message or update.effective_message
+        chat = update.effective_chat
+        reply = getattr(message, "reply_to_message", None) if message else None
+        if not reply or not chat:
+            return None
+
+        stored = self.message_store.find_by_telegram_message_id(
+            chat_id=chat.id,
+            telegram_message_id=reply.message_id,
+        )
+        source = "Telegram embedded reply preview"
+        direction = "unknown"
+        event_type = "unknown"
+        message_type = "unknown"
+        content = None
+        if stored:
+            source = "local message history"
+            direction = stored.get("direction") or direction
+            event_type = stored.get("event_type") or event_type
+            message_type = stored.get("message_type") or message_type
+            content = stored.get("text") or stored.get("transcript")
+
+        if not content:
+            content = reply.text or reply.caption
+        if not content:
+            if getattr(reply, "voice", None):
+                content = "[Referenced Telegram voice message; transcript not available in local history.]"
+            elif getattr(reply, "photo", None):
+                content = "[Referenced Telegram photo; caption not available.]"
+            elif getattr(reply, "video", None):
+                content = "[Referenced Telegram video; caption not available.]"
+            elif getattr(reply, "document", None):
+                name = reply.document.file_name if reply.document else None
+                content = f"[Referenced Telegram document: {name or 'unnamed document'}]"
+            else:
+                content = "[Referenced Telegram message has no text preview.]"
+
+        content = content.strip()
+        if len(content) > max_chars:
+            content = content[:max_chars].rstrip() + "\n[Reply context truncated.]"
+
+        return "\n".join(
+            [
+                "The current Telegram message is a reply to an earlier message.",
+                f"Referenced Telegram message ID: {reply.message_id}",
+                f"Reply context source: {source}",
+                f"Stored direction/type: {direction}/{event_type}/{message_type}",
+                "Referenced message excerpt:",
+                content,
+            ]
         )
 
     async def _send_text_message(
@@ -1497,8 +1588,15 @@ class TelegramCodexOperator:
             ]
         )
 
-    def _build_approved_prompt(self, telegram_user: str, body: str, transcript: Optional[str], proposal: str) -> str:
-        base_prompt = self._build_prompt(telegram_user, body, transcript)
+    def _build_approved_prompt(
+        self,
+        telegram_user: str,
+        body: str,
+        transcript: Optional[str],
+        proposal: str,
+        reply_context: Optional[str] = None,
+    ) -> str:
+        base_prompt = self._build_prompt(telegram_user, body, transcript, reply_context=reply_context)
         safe_mode_context = "\n\n".join(
             [
                 "RESTRICTED MODE APPROVAL CONTEXT:",
@@ -2367,7 +2465,14 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 metadata={"chunk_start": i, "chunk_size": chunk_size},
             )
 
-    def _build_prompt(self, telegram_user: str, body: str, transcript: Optional[str]) -> str:
+    def _build_prompt(
+        self,
+        telegram_user: str,
+        body: str,
+        transcript: Optional[str],
+        *,
+        reply_context: Optional[str] = None,
+    ) -> str:
         parts = [
             "You are responding through a Telegram operator bridge running on the user's own machine.",
             f"The selected coding agent provider is {self.config.agent_provider}.",
@@ -2393,6 +2498,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             parts.append(f"Transcript: {transcript}")
         else:
             parts.append("This message came from Telegram text.")
+        if reply_context:
+            parts.append("Telegram reply context:")
+            parts.append(reply_context)
         parts.append("User message:")
         parts.append(body.strip())
         return "\n\n".join(parts)
@@ -2409,6 +2517,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         chat_id = update.effective_chat.id
         user = update.effective_user
         username = user.username or user.full_name or str(user.id)
+        reply_context = self._reply_context_for_update(update)
 
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
@@ -2445,9 +2554,15 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             try:
                 LOGGER.info("Processing message chat_id=%s user=%s transcript=%s", chat_id, username, bool(transcript))
                 if approved_proposal:
-                    prompt = self._build_approved_prompt(username, text, transcript, approved_proposal)
+                    prompt = self._build_approved_prompt(
+                        username,
+                        text,
+                        transcript,
+                        approved_proposal,
+                        reply_context=reply_context,
+                    )
                 else:
-                    prompt = self._build_prompt(username, text, transcript)
+                    prompt = self._build_prompt(username, text, transcript, reply_context=reply_context)
                 code_mode_checkpoint = await asyncio.to_thread(self._prepare_code_mode_checkpoint)
                 new_session_id, reply_text = await asyncio.to_thread(
                     self._send_agent_prompt,
