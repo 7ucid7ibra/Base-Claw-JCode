@@ -362,6 +362,10 @@ class OperatorConfig:
     board_path: str
     board_state_path: Path
     board_agent_aliases: list[str]
+    source_update_remote: str
+    supervisor_device_label: str
+    supervisor_core_purpose: str
+    supervisor_do_not: list[str]
     local_vision_enabled: bool
     local_vision_base_url: str
     local_vision_model: str
@@ -1514,16 +1518,12 @@ class TelegramCodexOperator:
             "display_name": self.config.supervisor_name,
             "role": self.config.supervisor_role,
             "team_slot": self.config.supervisor_id,
-            "role_source": "Raspberry Pi bootstrap: agent_bootstraps/maat.md, agents.json, device_registry.json",
-            "core_purpose": "Improve reliability through review, verification, consistency checking, and regression detection.",
-            "do_not": [
-                "Do not take over mission direction.",
-                "Do not claim to be BaseClaw when operating as Ma'at.",
-                "Do not review your own source update as an independent reviewer.",
-            ],
+            "role_source": "local supervisor configuration and system inventory",
+            "core_purpose": self.config.supervisor_core_purpose,
+            "do_not": self.config.supervisor_do_not,
             "machine": {
                 "hostname": socket.gethostname(),
-                "device_label": "12 GB RAM Windows laptop",
+                "device_label": self.config.supervisor_device_label,
                 "os": platform.platform(),
                 "system": platform.system(),
                 "release": platform.release(),
@@ -2322,7 +2322,13 @@ class TelegramCodexOperator:
             return f"Update blocked: {reason}"
         branch = str(body.get("branch") or "main").strip()
         commit = str(body.get("commit") or "").strip()
-        fetch = self._git_command(["fetch", "pi-mirror", branch])
+        remote = self._select_source_update_remote()
+        if not remote:
+            return (
+                "Update blocked: no usable source update remote is configured. "
+                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a Pi mirror remote."
+            )
+        fetch = self._git_command(["fetch", remote, branch])
         if fetch.returncode != 0:
             return "Update blocked: git fetch failed: " + (fetch.stderr or fetch.stdout).strip()
         current = self._git_command(["rev-parse", "--short", "HEAD"])
@@ -2332,6 +2338,24 @@ class TelegramCodexOperator:
         if merge.returncode != 0:
             return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
         return f"Updated local source to {commit[:7]}. Restart the operator to run the new code."
+
+    def _select_source_update_remote(self) -> Optional[str]:
+        preferred = self.config.source_update_remote.strip()
+        remotes = self._git_command(["remote"])
+        if remotes.returncode != 0:
+            return preferred or None
+        names = {line.strip() for line in remotes.stdout.splitlines() if line.strip()}
+        if preferred and preferred in names:
+            return preferred
+        if "pi-mirror" in names:
+            return "pi-mirror"
+        if "origin" in names:
+            origin_url = self._git_command(["remote", "get-url", "origin"])
+            if origin_url.returncode == 0:
+                url = origin_url.stdout.strip()
+                if "agent-system.git" in url or self.config.board_remote.split("@")[-1].split(":")[0] in url:
+                    return "origin"
+        return None
 
     async def _send_source_update_card(
         self,
@@ -2392,17 +2416,24 @@ class TelegramCodexOperator:
                         if entry["_entry_id"] not in seen and self._board_entry_relevant(entry)
                     ]
                     if new_relevant:
-                        state["seen"] = list(seen.union(current_ids))
-                        await asyncio.to_thread(self._save_board_state, state)
+                        new_relevant_ids = {entry["_entry_id"] for entry in new_relevant}
+                        delivered_ids: set[str] = set()
                         for entry in new_relevant:
+                            delivered = False
                             for chat_id in self.config.allowed_chat_ids:
                                 try:
                                     if str(entry.get("type") or "").strip() == "source_baseline_update":
                                         await self._send_source_update_card(application, chat_id, entry)
                                     else:
                                         await self._send_board_entry_card(application, chat_id, entry)
+                                    delivered = True
                                 except Exception:
                                     LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
+                            if delivered:
+                                delivered_ids.add(entry["_entry_id"])
+                        safe_seen_ids = (set(current_ids) - new_relevant_ids).union(delivered_ids)
+                        state["seen"] = list(seen.union(safe_seen_ids))
+                        await asyncio.to_thread(self._save_board_state, state)
                     elif current_ids:
                         state["seen"] = list(seen.union(current_ids))
                         await asyncio.to_thread(self._save_board_state, state)
@@ -3968,13 +3999,31 @@ def load_config() -> OperatorConfig:
         Path.home() / "Downloads" / "maat_pi_known_hosts",
     )
     history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
-    supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "maat-supervisor").strip() or "maat-supervisor"
-    supervisor_name = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_NAME", "Ma'at").strip() or "Ma'at"
-    supervisor_role = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ROLE", "critic").strip() or "critic"
+    supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "").strip()
+    if not supervisor_id:
+        supervisor_id = f"{history_agent_name}-supervisor" if history_agent_name else "local-supervisor"
+    supervisor_name = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_NAME", "").strip() or supervisor_id
+    supervisor_role = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ROLE", "").strip() or "unspecified"
+    supervisor_device_label = (
+        os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL", "").strip()
+        or os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", "").strip()
+        or os.environ.get("COMPUTERNAME", "").strip()
+        or socket.gethostname()
+    )
+    supervisor_core_purpose = (
+        os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_CORE_PURPOSE", "").strip()
+        or "Local Telegram-controlled coding supervisor."
+    )
+    supervisor_do_not = parse_csv_list(
+        os.environ.get(
+            "TELEGRAM_OPERATOR_SUPERVISOR_DO_NOT",
+            "Do not infer identity from stale chat memory,Do not review your own source update as independent review",
+        )
+    )
     board_aliases = parse_csv_list(
         os.environ.get(
             "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
-            f"{supervisor_id},{history_agent_name},baseclaw,maat-supervisor,developer-agent",
+            f"{supervisor_id},{history_agent_name},developer-agent",
         )
     )
     return OperatorConfig(
@@ -4016,6 +4065,10 @@ def load_config() -> OperatorConfig:
             BASE_DIR / "telegram_operator_board_state.json",
         ),
         board_agent_aliases=board_aliases,
+        source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "pi-mirror").strip() or "pi-mirror",
+        supervisor_device_label=supervisor_device_label,
+        supervisor_core_purpose=supervisor_core_purpose,
+        supervisor_do_not=supervisor_do_not,
         local_vision_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED", ""), False),
         local_vision_base_url=os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
         local_vision_model=os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL", "").strip(),

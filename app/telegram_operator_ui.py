@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 import tkinter as tk
 from pathlib import Path
@@ -53,6 +54,9 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_SUPERVISOR_ID",
     "TELEGRAM_OPERATOR_SUPERVISOR_NAME",
     "TELEGRAM_OPERATOR_SUPERVISOR_ROLE",
+    "TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL",
+    "TELEGRAM_OPERATOR_SUPERVISOR_CORE_PURPOSE",
+    "TELEGRAM_OPERATOR_SUPERVISOR_DO_NOT",
     "TELEGRAM_OPERATOR_HISTORY_AGENT",
     "TELEGRAM_OPERATOR_HISTORY_DEVICE",
     "TELEGRAM_OPERATOR_HISTORY_REMOTE",
@@ -66,6 +70,7 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_BOARD_PATH",
     "TELEGRAM_OPERATOR_BOARD_STATE_PATH",
     "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
+    "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL",
@@ -94,10 +99,13 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_CODEX_MODEL": "",
     "TELEGRAM_OPERATOR_SAFETY_MODE": "safe",
     "TELEGRAM_OPERATOR_SAFE_MODE": "false",
-    "TELEGRAM_OPERATOR_SUPERVISOR_ID": "maat-supervisor",
-    "TELEGRAM_OPERATOR_SUPERVISOR_NAME": "Ma'at",
-    "TELEGRAM_OPERATOR_SUPERVISOR_ROLE": "critic",
-    "TELEGRAM_OPERATOR_HISTORY_AGENT": "maat",
+    "TELEGRAM_OPERATOR_SUPERVISOR_ID": "",
+    "TELEGRAM_OPERATOR_SUPERVISOR_NAME": "",
+    "TELEGRAM_OPERATOR_SUPERVISOR_ROLE": "",
+    "TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL": "",
+    "TELEGRAM_OPERATOR_SUPERVISOR_CORE_PURPOSE": "",
+    "TELEGRAM_OPERATOR_SUPERVISOR_DO_NOT": "Do not infer identity from stale chat memory,Do not review your own source update as independent review",
+    "TELEGRAM_OPERATOR_HISTORY_AGENT": "",
     "TELEGRAM_OPERATOR_HISTORY_DEVICE": "",
     "TELEGRAM_OPERATOR_HISTORY_REMOTE": "",
     "TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH": "",
@@ -109,7 +117,8 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_BOARD_REMOTE": "",
     "TELEGRAM_OPERATOR_BOARD_PATH": "/home/ai/agent_board/entries.ndjson",
     "TELEGRAM_OPERATOR_BOARD_STATE_PATH": str(BASE_DIR / "telegram_operator_board_state.json"),
-    "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES": "maat,maat-supervisor,baseclaw,developer-agent",
+    "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES": "",
+    "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE": "pi-mirror",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED": "false",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL": "http://127.0.0.1:1234/v1",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL": "",
@@ -825,16 +834,23 @@ class OperatorUi(ctk.CTk):
             self.refresh_log()
             return
         self.set_status("Starting", "Starting operator...", None)
-        if not SUPERVISOR_SCRIPT.exists():
-            self.set_status("Setup needed", f"Missing supervisor script: {SUPERVISOR_SCRIPT}", False)
-            messagebox.showerror("Setup needed", f"Missing supervisor script:\n{SUPERVISOR_SCRIPT}")
-            return
-        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
-        subprocess.Popen(
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT)],
-            cwd=str(BASE_DIR),
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        if sys.platform.startswith("win"):
+            if not SUPERVISOR_SCRIPT.exists():
+                self.set_status("Setup needed", f"Missing supervisor script: {SUPERVISOR_SCRIPT}", False)
+                messagebox.showerror("Setup needed", f"Missing supervisor script:\n{SUPERVISOR_SCRIPT}")
+                return
+            powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+            subprocess.Popen(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT)],
+                cwd=str(BASE_DIR),
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, str(OPERATOR_SCRIPT)],
+                cwd=str(BASE_DIR),
+                start_new_session=True,
+            )
         self.after(1500, self.refresh_status)
 
     def _kill_operator_processes(self, *, show_errors: bool = True) -> None:
