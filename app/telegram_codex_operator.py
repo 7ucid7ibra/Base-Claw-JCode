@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -356,6 +357,10 @@ class OperatorConfig:
     board_path: str
     board_state_path: Path
     board_agent_aliases: list[str]
+    local_vision_enabled: bool
+    local_vision_base_url: str
+    local_vision_model: str
+    local_vision_timeout_seconds: int
 
 
 @dataclass
@@ -3018,6 +3023,17 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             )
             return
 
+        local_vision_summary = ""
+        try:
+            local_vision_summary = await asyncio.to_thread(
+                self._summarize_video_with_local_vision,
+                video_path,
+                metadata,
+            )
+        except Exception as exc:
+            LOGGER.warning("Local video vision summary failed chat_id=%s error=%s", chat_id, exc)
+            local_vision_summary = f"Local vision summary failed: {exc}"
+
         details = [
             f"Saved locally as: {video_path}",
             f"Source: Telegram {source}",
@@ -3030,6 +3046,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             details.append(f"MIME type: {mime_type}")
         if file_size is not None:
             details.append(f"File size: {file_size} bytes")
+        if local_vision_summary:
+            details.extend(["", "Local LM Studio vision summary:", local_vision_summary])
 
         body = "\n\n".join(
             [
@@ -3040,6 +3058,91 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             ]
         )
         await self._process_user_message(update, context, body, keepalive=keepalive)
+
+    def _resolve_ffmpeg(self) -> Optional[str]:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            return ffmpeg
+        for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+            if Path(candidate).exists():
+                return candidate
+        return None
+
+    def _summarize_video_with_local_vision(self, video_path: Path, metadata: dict[str, Any]) -> str:
+        if not self.config.local_vision_enabled:
+            return ""
+        if not self.config.local_vision_model:
+            return "Local vision is enabled, but TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL is empty."
+        ffmpeg = self._resolve_ffmpeg()
+        if not ffmpeg:
+            return "Local vision skipped because ffmpeg is not available."
+
+        contact_sheet = video_path.with_name(f"{video_path.stem}_contact_sheet.jpg")
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            "fps=1,scale=384:-1,tile=3x3:padding=6:margin=6",
+            "-frames:v",
+            "1",
+            str(contact_sheet),
+        ]
+        process = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            **hidden_subprocess_kwargs(),
+        )
+        if process.returncode != 0:
+            return "Local vision skipped because contact sheet generation failed: " + (process.stderr or process.stdout).strip()[:600]
+
+        image_base64 = base64.b64encode(contact_sheet.read_bytes()).decode("ascii")
+        prompt = (
+            "Describe this contact sheet from a Telegram video in 3 to 6 concise bullets. "
+            "Focus on visible subjects, scene changes, readable text if any, and whether the clip seems useful for follow-up editing or analysis."
+        )
+        payload = {
+            "model": self.config.local_vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 250,
+        }
+        base_url = self.config.local_vision_base_url.rstrip("/")
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            json=payload,
+            timeout=(10, self.config.local_vision_timeout_seconds),
+        )
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return "Local vision returned no choices."
+        message = choices[0].get("message") or {}
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text") or ""))
+            content = "\n".join(part for part in parts if part)
+        summary = str(content).strip()
+        return summary or "Local vision returned an empty summary."
 
     async def _download_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, index: int) -> dict[str, Any]:
         if not update.message or not update.message.photo:
@@ -3633,6 +3736,13 @@ def load_config() -> OperatorConfig:
             BASE_DIR / "telegram_operator_board_state.json",
         ),
         board_agent_aliases=board_aliases,
+        local_vision_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED", ""), False),
+        local_vision_base_url=os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip(),
+        local_vision_model=os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL", "").strip(),
+        local_vision_timeout_seconds=parse_positive_int(
+            os.environ.get("TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS", ""),
+            180,
+        ),
     )
 
 
