@@ -3760,7 +3760,7 @@ async def main() -> None:
         config.agent_timeout_seconds,
     )
     operator = TelegramCodexOperator(config)
-    application = Application.builder().token(config.bot_token).build()
+    application = Application.builder().token(config.bot_token).concurrent_updates(True).build()
     application.add_handler(CommandHandler("start", operator.start))
     application.add_handler(CommandHandler("reset", operator.reset))
     application.add_handler(CommandHandler("status", operator.status))
