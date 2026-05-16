@@ -62,7 +62,7 @@ PDF_EXTRACT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 VIDEO_MIME_PREFIX = "video/"
-DEFAULT_MANUAL_UPDATE_REF = "candidate/whitebook-combined-video-buttons-durable-callbacks-v1"
+DEFAULT_MANUAL_UPDATE_REF = "main"
 
 
 def utc_now() -> str:
@@ -1472,6 +1472,8 @@ class TelegramCodexOperator:
         self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.pending_manual_updates: Dict[int, str] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
+        self.board_poll_loop_active = False
+        self.board_poll_loop_inactive_reason = "not started"
 
     def _local_memory_gb(self) -> Optional[float]:
         if platform.system().lower() != "windows":
@@ -2445,7 +2447,11 @@ class TelegramCodexOperator:
         available, detail = self._board_available()
         if not available:
             LOGGER.info("Board polling not active: %s", detail)
+            self.board_poll_loop_active = False
+            self.board_poll_loop_inactive_reason = detail
             return
+        self.board_poll_loop_active = True
+        self.board_poll_loop_inactive_reason = ""
         while True:
             if not self.config.board_poll_enabled:
                 await asyncio.sleep(self.config.board_poll_interval_seconds)
@@ -3260,6 +3266,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             chat_id,
             (
                 f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
+                f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
                 f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
                 f"Board: {self.config.board_remote} {self.config.board_path}"
             ),
@@ -3289,10 +3296,14 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             update_operator_env,
             {"TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true" if enabled else "false"},
         )
-        restart_note = "The running polling loop will use this setting on its next interval."
+        if self.board_poll_loop_active:
+            restart_note = "The running polling loop will use this setting on its next interval."
+        else:
+            reason = f" Reason: {self.board_poll_loop_inactive_reason}." if self.board_poll_loop_inactive_reason else ""
+            restart_note = f"The setting is saved, but the polling loop is not active in this process.{reason} Restart after fixing board access."
         if was_enabled and not enabled:
             restart_note = "This disables future polling checks in the running process and is saved for restart."
-        elif not was_enabled and enabled:
+        elif not was_enabled and enabled and self.board_poll_loop_active:
             restart_note = "This enables polling in the running process; the loop will check again on its next interval."
         await self._send_text_message(
             context,
@@ -4114,6 +4125,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 chat_id,
                 (
                     f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
+                    f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
                     f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
                     f"Board: {self.config.board_remote} {self.config.board_path}"
                 ),
