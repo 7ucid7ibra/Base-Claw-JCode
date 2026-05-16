@@ -62,6 +62,7 @@ PDF_EXTRACT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 VIDEO_MIME_PREFIX = "video/"
+DEFAULT_MANUAL_UPDATE_REF = "candidate/whitebook-combined-video-buttons-durable-callbacks-v1"
 
 
 def utc_now() -> str:
@@ -365,6 +366,7 @@ class OperatorConfig:
     board_state_path: Path
     board_agent_aliases: list[str]
     source_update_remote: str
+    manual_update_ref: str
     supervisor_device_label: str
     supervisor_core_purpose: str
     supervisor_do_not: list[str]
@@ -1468,6 +1470,7 @@ class TelegramCodexOperator:
         self.pending_approvals: Dict[str, PendingApproval] = {}
         self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
         self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
+        self.pending_manual_updates: Dict[int, str] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
 
     def _local_memory_gb(self) -> Optional[float]:
@@ -2342,6 +2345,48 @@ class TelegramCodexOperator:
             return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
         return f"Updated local source to {commit[:7]}. Restart the operator to run the new code."
 
+    def _manual_update_ref(self, requested_ref: Optional[str] = None) -> str:
+        ref = (requested_ref or "").strip() or self.config.manual_update_ref.strip() or DEFAULT_MANUAL_UPDATE_REF
+        return ref
+
+    def _manual_update_summary(self, requested_ref: Optional[str] = None) -> str:
+        remote = self._select_source_update_remote()
+        ref = self._manual_update_ref(requested_ref)
+        current = self._git_command(["rev-parse", "--short", "HEAD"])
+        current_text = current.stdout.strip() if current.returncode == 0 else "unknown"
+        dirty = "yes" if self._git_dirty() else "no"
+        return (
+            "Manual source update.\n"
+            f"Remote: {remote or 'not configured'}\n"
+            f"Ref: {ref}\n"
+            f"Current commit: {current_text}\n"
+            f"Local changes: {dirty}\n\n"
+            "This will fetch from the Raspberry Pi and fast-forward only. It will not overwrite local edits."
+        )
+
+    def _pull_manual_update(self, requested_ref: Optional[str] = None) -> str:
+        if self._git_dirty():
+            return "Update blocked: local worktree is not clean."
+        remote = self._select_source_update_remote()
+        if not remote:
+            return (
+                "Update blocked: no usable source update remote is configured. "
+                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a Pi mirror remote."
+            )
+        ref = self._manual_update_ref(requested_ref)
+        fetch = self._git_command(["fetch", remote, ref])
+        if fetch.returncode != 0:
+            return "Update blocked: git fetch failed: " + (fetch.stderr or fetch.stdout).strip()
+        target = self._git_command(["rev-parse", "--short", "FETCH_HEAD"])
+        target_text = target.stdout.strip() if target.returncode == 0 else ref
+        current = self._git_command(["rev-parse", "--short", "HEAD"])
+        if current.returncode == 0 and current.stdout.strip() == target_text:
+            return f"Already current at {target_text}."
+        merge = self._git_command(["merge", "--ff-only", "FETCH_HEAD"])
+        if merge.returncode != 0:
+            return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
+        return f"Updated local source to {target_text}. Restart the operator to run the new code."
+
     def _select_source_update_remote(self) -> Optional[str]:
         preferred = self.config.source_update_remote.strip()
         remotes = self._git_command(["remote"])
@@ -2936,6 +2981,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             message_type="command",
             text=update.effective_message.text if update.effective_message else "/status",
         )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
         text = self._status_text(chat_id)
         await self._send_text_message(context, chat_id, text, event_type="command_status_reply")
         await self._send_voice_reply(context, chat_id, "Status sent in text.")
@@ -2972,6 +3020,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                     InlineKeyboardButton("Restart", callback_data="menu:restart"),
                     InlineKeyboardButton("Reset session", callback_data="menu:reset"),
                 ],
+                [InlineKeyboardButton("Update from Pi", callback_data="menu:update")],
             ]
         )
         text = (
@@ -3090,6 +3139,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             message_type="command",
             text=update.effective_message.text if update.effective_message else "/voice_status",
         )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
         await self._send_text_message(
             context,
             chat_id,
@@ -3200,6 +3252,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             message_type="command",
             text=update.effective_message.text if update.effective_message else "/board_poll_status",
         )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
         await self._send_text_message(
             context,
             chat_id,
@@ -3234,14 +3289,46 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             update_operator_env,
             {"TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true" if enabled else "false"},
         )
-        restart_note = "Restart is recommended so the background polling task matches the saved setting."
+        restart_note = "The running polling loop will use this setting on its next interval."
         if was_enabled and not enabled:
             restart_note = "This disables future polling checks in the running process and is saved for restart."
+        elif not was_enabled and enabled:
+            restart_note = "This enables polling in the running process; the loop will check again on its next interval."
         await self._send_text_message(
             context,
             chat_id,
             f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
             event_type="command_board_poll_toggle_reply",
+        )
+
+    async def update_from_pi(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        self._record_incoming_message(
+            update,
+            event_type="command_update",
+            message_type="command",
+            text=update.effective_message.text if update.effective_message else "/update",
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        requested_ref = " ".join(context.args).strip() if context.args else ""
+        ref = self._manual_update_ref(requested_ref)
+        self.pending_manual_updates[chat_id] = ref
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
+                    InlineKeyboardButton("Cancel", callback_data="update:cancel"),
+                ]
+            ]
+        )
+        await self._send_text_message(
+            context,
+            chat_id,
+            self._manual_update_summary(ref),
+            event_type="command_update_confirm",
+            reply_markup=keyboard,
         )
 
     def _spawn_replacement_operator(self) -> subprocess.Popen:
@@ -4052,7 +4139,52 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if action == "reset":
             await self._send_reset_confirmation(context, chat_id)
             return
+        if action == "update":
+            self.pending_manual_updates[chat_id] = self._manual_update_ref()
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="update:cancel"),
+                    ]
+                ]
+            )
+            await self._send_text_message(
+                context,
+                chat_id,
+                self._manual_update_summary(),
+                event_type="menu_update_confirm",
+                reply_markup=keyboard,
+            )
+            return
         await self._send_text_message(context, chat_id, "Unknown help menu action.", event_type="menu_unknown_action")
+
+    async def on_manual_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        query = update.callback_query
+        if not query or not query.message:
+            return
+        chat_id = query.message.chat_id
+        action = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
+        self._record_callback(update, f"manual_update_{action}", None)
+        if not self._authorized(chat_id):
+            await query.answer("Unauthorized chat.", show_alert=True)
+            return
+        if action == "cancel":
+            self.pending_manual_updates.pop(chat_id, None)
+            await query.answer("Cancelled.")
+            await query.edit_message_text("Update cancelled.")
+            return
+        if action != "confirm":
+            await query.answer("Unknown update action.", show_alert=True)
+            return
+        ref = self.pending_manual_updates.pop(chat_id, None) or self._manual_update_ref()
+        await query.answer("Updating from Pi.")
+        result = await asyncio.to_thread(self._pull_manual_update, ref)
+        await self._send_text_message(context, chat_id, result, event_type="manual_update_result")
+        try:
+            await query.edit_message_text(result[:3900])
+        except Exception:
+            LOGGER.exception("Failed to edit manual update callback message chat_id=%s", chat_id)
 
     async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -4355,6 +4487,8 @@ def load_config() -> OperatorConfig:
         ),
         board_agent_aliases=board_aliases,
         source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "pi-mirror").strip() or "pi-mirror",
+        manual_update_ref=os.environ.get("TELEGRAM_OPERATOR_MANUAL_UPDATE_REF", DEFAULT_MANUAL_UPDATE_REF).strip()
+        or DEFAULT_MANUAL_UPDATE_REF,
         supervisor_device_label=supervisor_device_label,
         supervisor_core_purpose=supervisor_core_purpose,
         supervisor_do_not=supervisor_do_not,
@@ -4397,10 +4531,12 @@ async def main() -> None:
     application.add_handler(CommandHandler("board_poll_status", operator.board_poll_status))
     application.add_handler(CommandHandler("board_poll_on", operator.board_poll_on))
     application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
+    application.add_handler(CommandHandler("update", operator.update_from_pi))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_menu_callback, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(operator.on_reset_callback, pattern=r"^reset:"))
+    application.add_handler(CallbackQueryHandler(operator.on_manual_update_callback, pattern=r"^update:"))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
     application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
     application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
