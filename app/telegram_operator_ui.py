@@ -108,7 +108,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_SPEECH_PORT": "8766",
     "TELEGRAM_OPERATOR_LLM_PORT": "1234",
     "TELEGRAM_OPERATOR_REMOTE_SPEECH_URL": "",
-    "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK": "true",
+    "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK": "false",
     "TELEGRAM_OPERATOR_STARTUP_NOTICE": "true",
     "TELEGRAM_OPERATOR_KOKORO_URL": "http://127.0.0.1:8766",
     "TELEGRAM_OPERATOR_KOKORO_URLS": "",
@@ -156,6 +156,7 @@ DEFAULTS = {
 }
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
+CLAUDE_MODELS = ["", "sonnet", "opus", "claude-sonnet-4-6", "claude-opus-4-6"]
 JCODE_MODELS = ["qwen3-coder-30b", "qwen/qwen3-coder-30b"]
 PROVIDERS = ["jcode", "codex", "claude"]
 CLOUD_HARNESSES = ["codex", "claude"]
@@ -357,6 +358,17 @@ def port_from_url(url: str, default: str) -> str:
         return default
     parts = urlsplit(url)
     return str(parts.port or default)
+
+
+def is_local_host(host: str) -> bool:
+    return host.strip().lower() in {"", "127.0.0.1", "localhost", "0.0.0.0", "::1"}
+
+
+def is_local_speech_url(url: str) -> bool:
+    normalized = normalize_speech_url(url)
+    if not normalized:
+        return True
+    return is_local_host(urlsplit(normalized).hostname or "")
 
 
 def build_host_url(host: str, port: str, suffix: str = "") -> str:
@@ -572,6 +584,8 @@ class OperatorUi(ctk.CTk):
         self.model_refresh_button: ctk.CTkButton | None = None
         self.api_key_label: ctk.CTkLabel | None = None
         self.api_key_entry: ctk.CTkEntry | None = None
+        self.timeout_label: ctk.CTkLabel | None = None
+        self.timeout_entry: ctk.CTkEntry | None = None
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.log_box: ctk.CTkTextbox | None = None
@@ -586,6 +600,7 @@ class OperatorUi(ctk.CTk):
         self.chat_busy = False
         self.autosave_ready = False
         self.autosave_after_id: str | None = None
+        self.entry_labels: dict[str, ctk.CTkLabel] = {}
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self._wire_autosave()
@@ -662,7 +677,6 @@ class OperatorUi(ctk.CTk):
         self._entry(host_row, "Host IP / name", "TELEGRAM_OPERATOR_REMOTE_HOST", row=0, column=0, padx=(0, 6))
         self._entry(host_row, "Speech port", "TELEGRAM_OPERATOR_SPEECH_PORT", row=0, column=1, padx=6)
         self._entry(host_row, "LLM port", "TELEGRAM_OPERATOR_LLM_PORT", row=0, column=2, padx=(6, 0))
-        self._switch(connection, "Use local speech fallback", "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", row=6)
 
         agent = self._card(settings_body, "Agent", "Harness, model provider, workspace, and safety controls.", 3, 0)
         provider = self.values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
@@ -756,7 +770,7 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
         )
         self.api_key_entry.grid(row=5, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
-        self._entry(
+        self.timeout_entry = self._entry(
             agent_options,
             "Agent timeout seconds",
             "TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS",
@@ -764,6 +778,7 @@ class OperatorUi(ctk.CTk):
             column=1,
             padx=(6, 0),
         )
+        self.timeout_label = self.entry_labels.get("TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS")
         self._sync_agent_option_visibility()
         access_scope = self.values.get("TELEGRAM_OPERATOR_ACCESS_SCOPE", "").strip()
         action_mode = self.values.get("TELEGRAM_OPERATOR_ACTION_MODE", "").strip()
@@ -1005,7 +1020,7 @@ class OperatorUi(ctk.CTk):
         padx: tuple[int, int] = (0, 0),
     ) -> ctk.CTkEntry:
         self.vars[key] = tk.StringVar(value=self.values.get(key, DEFAULTS[key]))
-        self._label(parent, label, row=row, column=column, padx=padx)
+        self.entry_labels[key] = self._label(parent, label, row=row, column=column, padx=padx)
         entry = ctk.CTkEntry(
             parent,
             textvariable=self.vars[key],
@@ -1155,15 +1170,12 @@ class OperatorUi(ctk.CTk):
                 self.local_provider_combo.grid_remove()
 
         if self.model_label and self.model_picker:
-            if provider == "claude":
-                self.model_label.grid_remove()
-                self.model_picker.grid_remove()
-            elif local_mode:
+            if local_mode:
                 self.model_label.configure(text="Model")
                 self.model_label.grid(row=2, column=1, sticky="ew", padx=(6, 0))
                 self.model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
             else:
-                self.model_label.configure(text="Codex model")
+                self.model_label.configure(text="Claude model" if provider == "claude" else "Codex model")
                 self.model_label.grid(row=2, column=0, sticky="ew", padx=(0, 6))
                 self.model_picker.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
 
@@ -1185,6 +1197,14 @@ class OperatorUi(ctk.CTk):
                 self.api_key_label.grid_remove()
                 self.api_key_entry.grid_remove()
 
+        if self.timeout_label and self.timeout_entry:
+            if local_mode:
+                self.timeout_label.grid(row=4, column=1, sticky="ew", padx=(6, 0))
+                self.timeout_entry.grid(row=5, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+            else:
+                self.timeout_label.grid(row=2, column=1, sticky="ew", padx=(6, 0))
+                self.timeout_entry.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+
     def _model_options(self, provider: str, model: str) -> list[str]:
         provider = provider.strip().lower()
         if provider == "codex":
@@ -1192,7 +1212,7 @@ class OperatorUi(ctk.CTk):
         elif provider == "jcode":
             options = self._local_model_options()
         elif provider == "claude":
-            options = ["", "default"]
+            options = CLAUDE_MODELS
         else:
             options = ["", *JCODE_MODELS, *CODEX_MODELS]
         return options if model in options else [model, *options]
@@ -1327,7 +1347,10 @@ class OperatorUi(ctk.CTk):
 
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
         remote = values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "").strip()
-        local_fallback = parse_bool(values.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), True)
+        local_fallback = is_local_speech_url(remote) or parse_bool(
+            values.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""),
+            False,
+        )
         if remote:
             if speech_health(remote):
                 return True
@@ -1733,6 +1756,9 @@ class OperatorUi(ctk.CTk):
             return cmd, None
         if provider == "claude":
             cmd = [self._require_executable("claude"), "-p", "--dangerously-skip-permissions", "--output-format", "text"]
+            model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
+            if model and model != "default":
+                cmd.extend(["--model", model])
             if session_id:
                 cmd.append("--continue")
             return cmd, prompt
@@ -1849,7 +1875,8 @@ class OperatorUi(ctk.CTk):
                 "For LM Studio and Ollama, the selected model host and LLM port are used for model discovery."
             )
         if provider == "claude":
-            return "Backend details: Claude CLI provider. The exact Claude model is controlled by the installed Claude CLI/account configuration."
+            model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip() or "Claude CLI default"
+            return f"Backend details: Claude CLI provider, model `{model}`."
         if provider == "codex":
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "") or "default"
             return f"Backend details: Codex CLI provider, model `{model}`."

@@ -101,7 +101,7 @@ Kokoro and Whisper can run locally or on a separate reachable host.
 - `TELEGRAM_OPERATOR_REMOTE_HOST` is the shared host for speech and local model services.
 - `TELEGRAM_OPERATOR_SPEECH_PORT` is the Kokoro/Whisper service port.
 - `TELEGRAM_OPERATOR_LLM_PORT` is the LM Studio or compatible local model API port.
-- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK=true` lets the bridge try local speech if the configured host is unavailable.
+- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK` is an advanced compatibility flag. Normal installs use the configured host and speech port directly; `127.0.0.1` means local speech.
 
 The UI can discover voices from the active Kokoro host. Selecting a voice persists the voice and inferred language code.
 

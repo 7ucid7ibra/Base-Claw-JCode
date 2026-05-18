@@ -238,9 +238,7 @@ For speech hosting, `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the only visible ho
 
 The remote speech host field accepts a bare IP or hostname. The app adds `http://` and port `8766` automatically when they are omitted.
 
-For lightweight clients, turn off `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK` or install with `.\install.ps1 -Mode client -NoLocalSpeechFallback`. Then the client relies solely on the configured speech host and does not need local Kokoro, faster-whisper, or ffmpeg for normal operation.
-
-When local speech fallback is enabled, the UI tries to start the local Kokoro/Whisper host before starting the Telegram operator. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
+Set the host field to `127.0.0.1` for local speech, or to another reachable IP/hostname for a separate speech host. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
 If no workspace home is selected, the UI uses `agent_workspace` inside the project folder as the assistant's default home.
 

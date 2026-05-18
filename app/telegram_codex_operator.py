@@ -216,9 +216,9 @@ def build_speech_urls(remote_url: str, local_fallback: bool = True) -> list[str]
     urls = []
     remote_url = normalize_speech_url(remote_url)
     local_url = "http://127.0.0.1:8766"
-    if remote_url and not is_local_speech_url(remote_url):
+    if remote_url:
         urls.append(remote_url)
-    if local_fallback:
+    if local_fallback and not is_local_speech_url(remote_url):
         urls.append(local_url)
         urls.extend(tailscale_speech_urls())
     return unique_urls(urls)
@@ -1367,6 +1367,8 @@ class LocalCliBridge:
     def _command(self, prompt: str, session_id: Optional[str]) -> tuple[list[str], Optional[str]]:
         if self.provider == "claude":
             cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "text"]
+            if self.model and self.model != "default":
+                cmd.extend(["--model", self.model])
             if session_id:
                 cmd.append("--continue")
             return cmd, prompt
@@ -2939,6 +2941,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if provider == "codex":
             model = self.config.codex_model or "Codex CLI default"
             return f"Backend details: this instance is using the Codex CLI with model `{model}`."
+        if provider == "claude":
+            model = self.config.codex_model or "Claude CLI default"
+            return f"Backend details: this instance is using the Claude CLI with model `{model}`."
         return f"Backend details: this instance is using provider `{self.config.agent_provider}`."
 
     async def _process_user_message(
@@ -4600,7 +4605,7 @@ def load_config() -> OperatorConfig:
         legacy_url = os.environ.get("TELEGRAM_OPERATOR_KOKORO_URL", "").strip()
         if legacy_url and not is_local_speech_url(legacy_url):
             remote_speech_url = legacy_url
-    local_speech_fallback = parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), True)
+    local_speech_fallback = parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), False)
     speech_urls = build_speech_urls(remote_speech_url, local_speech_fallback)
     safety_mode = os.environ.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip().lower()
     if safety_mode not in {"restricted", "safe", "code", "full"}:
