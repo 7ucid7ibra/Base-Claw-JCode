@@ -2086,13 +2086,22 @@ class TelegramCodexOperator:
             **hidden_subprocess_kwargs(),
         )
 
+    def _is_git_repo(self) -> bool:
+        result = self._git_command(["rev-parse", "--is-inside-work-tree"])
+        return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
     def _git_dirty(self) -> bool:
+        if not self._is_git_repo():
+            return False
         result = self._git_command(["status", "--porcelain", "--untracked-files=normal"])
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "git status failed")
         return bool(result.stdout.strip())
 
     def _git_commit_all(self, message: str) -> Optional[str]:
+        if not self._is_git_repo():
+            LOGGER.info("Skipping git checkpoint because this install is not a git repository.")
+            return None
         if not self._git_dirty():
             return None
         add_result = self._git_command(["add", "-A"])

@@ -87,6 +87,8 @@ Access scope controls where the agent is allowed to work:
 - `code`: the workspace plus this app repository.
 - `full`: no path restriction from BaseClaw.
 
+When the install is a git checkout, `code` mode creates automatic git checkpoints before and after write-capable agent runs. Archive installs without a `.git` folder skip those checkpoints instead of blocking the request.
+
 Action mode controls how quickly it may act:
 
 - `read`: read-only intent.
