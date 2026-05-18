@@ -266,6 +266,37 @@ LANGUAGE_CODE_LABELS = {
 }
 LANGUAGE_LABELS = [LANGUAGE_CODE_LABELS[code] for code in LANGUAGE_CODES]
 LANGUAGE_LABEL_TO_CODE = {label: code for code, label in LANGUAGE_CODE_LABELS.items()}
+INFO_MARK = "  ⓘ"
+CARD_HELP_TEXT = {
+    "Runtime": "Start, stop, or restart the Telegram bridge process. Settings save automatically and do not require a restart unless the running agent should pick them up.",
+    "Connection": "Telegram bot credentials plus the shared host and ports for local services.",
+    "Voice": "Controls voice replies, Kokoro voice selection, language, and Whisper transcription model.",
+    "Agent": "Controls which coding harness runs, what model it uses, and what files it may access.",
+    "Recent Log": "Shows the most recent local bridge log lines for quick troubleshooting.",
+}
+HELP_TEXT = {
+    "Bot token": "The Telegram bot token from BotFather. It is saved locally in your env file.",
+    "Chat id(s)": "Allowed Telegram chat IDs. Use commas for multiple chats.",
+    "Host IP / name": "The machine hosting local services. Use 127.0.0.1 for this machine or an IP/hostname for another reachable machine.",
+    "STT/TTS port": "The speech service port. The same endpoint handles Whisper speech-to-text and Kokoro text-to-speech.",
+    "LLM port": "The local model API port. LM Studio usually uses 1234; Ollama usually uses 11434.",
+    "Workspace home": "The default working folder for the assistant.",
+    "Additional allowed paths": "Extra folders the assistant may access when access scope allows selected paths.",
+    "Mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex or Claude directly.",
+    "Harness": "The coding tool that receives the task and performs file or terminal work.",
+    "Local model provider": "The backend JCode connects to for models, such as LM Studio, Ollama, or hosted API providers.",
+    "Model": "The model selected for the current harness or provider.",
+    "Claude model": "The model name passed to the Claude CLI. Leave blank/default if you want Claude to choose its configured default.",
+    "Codex model": "The model name passed to Codex. Use default to rely on the CLI configuration.",
+    "API key for selected provider": "Only needed for hosted JCode providers that require an API key. Local LM Studio and Ollama do not use this.",
+    "Agent timeout seconds": "Maximum time the agent process may run for one request before BaseClaw stops waiting.",
+    "Access scope": "Controls which folders the assistant may read or write.",
+    "Action mode": "Controls whether the assistant is read-only, asks before writes, or acts without extra approval.",
+    "Voice": "Kokoro voice used for spoken replies.",
+    "Language code": "Speech language/accent code sent to Kokoro.",
+    "Whisper model": "Whisper model size for voice note transcription. Larger models are slower but can be more accurate.",
+    "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
+}
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -565,6 +596,57 @@ def root_operator_processes() -> list[dict]:
     return roots or processes
 
 
+class Tooltip:
+    def __init__(self, widget: tk.Widget, text: str, delay_ms: int = 350) -> None:
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.after_id: str | None = None
+        self.window: tk.Toplevel | None = None
+        widget.bind("<Enter>", self.schedule, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def schedule(self, _event: tk.Event | None = None) -> None:
+        self.cancel()
+        self.after_id = self.widget.after(self.delay_ms, self.show)
+
+    def cancel(self) -> None:
+        if self.after_id:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def show(self) -> None:
+        if self.window or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.wm_geometry(f"+{x}+{y}")
+        self.window.configure(bg=COLORS["border"])
+        label = tk.Label(
+            self.window,
+            text=self.text,
+            justify="left",
+            wraplength=320,
+            background=COLORS["panel_lift"],
+            foreground=COLORS["text"],
+            relief="flat",
+            borderwidth=0,
+            padx=10,
+            pady=8,
+            font=("Helvetica", 12),
+        )
+        label.pack(padx=1, pady=1)
+
+    def hide(self, _event: tk.Event | None = None) -> None:
+        self.cancel()
+        if self.window:
+            self.window.destroy()
+            self.window = None
+
+
 class OperatorUi(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -601,6 +683,7 @@ class OperatorUi(ctk.CTk):
         self.autosave_ready = False
         self.autosave_after_id: str | None = None
         self.entry_labels: dict[str, ctk.CTkLabel] = {}
+        self.tooltips: list[Tooltip] = []
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self._wire_autosave()
@@ -986,9 +1069,14 @@ class OperatorUi(ctk.CTk):
         card = ctk.CTkFrame(parent, fg_color=COLORS["panel_soft"], border_color=COLORS["border_soft"], border_width=1, corner_radius=18)
         card.grid(row=row, column=column, columnspan=columnspan, sticky="ew", padx=padx, pady=(0, 10))
         card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=16, weight="bold"), text_color=COLORS["text"]).grid(
-            row=0, column=0, sticky="w", padx=18, pady=(15, 0)
+        title_label = ctk.CTkLabel(
+            card,
+            text=self._label_text(title, CARD_HELP_TEXT),
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLORS["text"],
         )
+        title_label.grid(row=0, column=0, sticky="w", padx=18, pady=(15, 0))
+        self._attach_tooltip(title_label, CARD_HELP_TEXT.get(title, ""))
         ctk.CTkLabel(card, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), wraplength=560).grid(
             row=1, column=0, sticky="w", padx=18, pady=(2, 12)
         )
@@ -1005,9 +1093,28 @@ class OperatorUi(ctk.CTk):
         column: int = 0,
         padx: tuple[int, int] = (0, 0),
     ) -> ctk.CTkLabel:
-        label = ctk.CTkLabel(parent, text=text, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w")
+        label = ctk.CTkLabel(parent, text=self._label_text(text), text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w")
         label.grid(row=row, column=column, sticky="ew", padx=padx)
+        self._attach_tooltip(label, HELP_TEXT.get(text, ""))
         return label
+
+    def _label_text(self, text: str, help_texts: dict[str, str] | None = None) -> str:
+        return f"{text}{INFO_MARK}" if (help_texts or HELP_TEXT).get(text) else text
+
+    def _configure_label_text(self, label: ctk.CTkLabel, text: str) -> None:
+        label.configure(text=self._label_text(text))
+        self._attach_tooltip(label, HELP_TEXT.get(text, ""))
+
+    def _attach_tooltip(self, widget: tk.Widget, text: str) -> None:
+        if not text:
+            return
+        existing = getattr(widget, "_baseclaw_tooltip", None)
+        if existing:
+            existing.text = text
+            return
+        tooltip = Tooltip(widget, text)
+        setattr(widget, "_baseclaw_tooltip", tooltip)
+        self.tooltips.append(tooltip)
 
     def _entry(
         self,
@@ -1053,7 +1160,7 @@ class OperatorUi(ctk.CTk):
         self.vars[key] = tk.StringVar(value="true" if value in {"1", "true", "yes", "on", "enabled"} else "false")
         switch = ctk.CTkSwitch(
             parent,
-            text=label,
+            text=self._label_text(label),
             variable=self.vars[key],
             onvalue="true",
             offvalue="false",
@@ -1063,6 +1170,7 @@ class OperatorUi(ctk.CTk):
             font=ctk.CTkFont(size=13),
         )
         switch.grid(row=row, column=0, sticky="w", pady=(2, 14))
+        self._attach_tooltip(switch, HELP_TEXT.get(label, ""))
 
     def choose_workspace(self) -> None:
         directory = filedialog.askdirectory(initialdir=self.vars["TELEGRAM_OPERATOR_WORKDIR"].get() or str(BASE_DIR))
@@ -1171,11 +1279,11 @@ class OperatorUi(ctk.CTk):
 
         if self.model_label and self.model_picker:
             if local_mode:
-                self.model_label.configure(text="Model")
+                self._configure_label_text(self.model_label, "Model")
                 self.model_label.grid(row=2, column=1, sticky="ew", padx=(6, 0))
                 self.model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
             else:
-                self.model_label.configure(text="Claude model" if provider == "claude" else "Codex model")
+                self._configure_label_text(self.model_label, "Claude model" if provider == "claude" else "Codex model")
                 self.model_label.grid(row=2, column=0, sticky="ew", padx=(0, 6))
                 self.model_picker.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
 
@@ -1190,7 +1298,11 @@ class OperatorUi(ctk.CTk):
         if self.api_key_label and self.api_key_entry:
             if api_key_needed:
                 provider_label = MODEL_PROVIDER_LABELS.get(model_provider, model_provider)
-                self.api_key_label.configure(text=f"{provider_label} API key")
+                self.api_key_label.configure(text=f"{provider_label} API key{INFO_MARK}")
+                self._attach_tooltip(
+                    self.api_key_label,
+                    f"API key used only for the selected hosted JCode provider: {provider_label}. It is not used for LM Studio or Ollama.",
+                )
                 self.api_key_label.grid(row=4, column=0, sticky="ew", padx=(0, 6))
                 self.api_key_entry.grid(row=5, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
             else:
