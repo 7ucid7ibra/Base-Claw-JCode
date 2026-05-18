@@ -123,7 +123,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_AGENT_COMMAND": "",
     "TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS": "900",
     "TELEGRAM_OPERATOR_CODEX_MODEL": "qwen3-coder-30b",
-    "TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE": "lmstudio-local",
+    "TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE": "",
     "TELEGRAM_OPERATOR_SAFETY_MODE": "safe",
     "TELEGRAM_OPERATOR_SAFE_MODE": "false",
     "TELEGRAM_OPERATOR_SUPERVISOR_ID": "",
@@ -698,7 +698,7 @@ class OperatorUi(ctk.CTk):
         model = self.values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip() or "qwen3-coder-30b"
         self.vars["TELEGRAM_OPERATOR_CODEX_MODEL"] = tk.StringVar(value=model)
         self.vars["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = tk.StringVar(
-            value=self.values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "").strip() or "lmstudio-local"
+            value=self.values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "").strip()
         )
         self._label(agent_options, "Local model provider", row=2, column=0, padx=(0, 6))
         ctk.CTkComboBox(
@@ -711,28 +711,31 @@ class OperatorUi(ctk.CTk):
             border_width=1,
         ).grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
         self._label(agent_options, "Model", row=2, column=1, padx=(6, 0))
+        model_picker = ctk.CTkFrame(agent_options, fg_color="transparent")
+        model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+        model_picker.grid_columnconfigure(0, weight=1)
         self.model_combo = ctk.CTkComboBox(
-            agent_options,
+            model_picker,
             variable=self.vars["TELEGRAM_OPERATOR_CODEX_MODEL"],
             values=self._model_options(provider, model),
             height=38,
             corner_radius=10,
             border_width=1,
         )
-        self.model_combo.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
-        self._entry(
-            agent_options,
-            "JCode model provider profile",
-            "TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE",
-            row=4,
-            column=0,
-            padx=(0, 6),
-        )
+        self.model_combo.grid(row=0, column=0, sticky="ew")
+        ctk.CTkButton(
+            model_picker,
+            text="Refresh",
+            width=82,
+            height=38,
+            corner_radius=10,
+            command=self.refresh_models,
+        ).grid(row=0, column=1, padx=(8, 0))
         self._entry(
             agent_options,
             "JCode API key",
             "TELEGRAM_OPERATOR_JCODE_API_KEY",
-            row=6,
+            row=4,
             secret=True,
             column=0,
             padx=(0, 6),
@@ -1062,10 +1065,27 @@ class OperatorUi(ctk.CTk):
         self.vars["TELEGRAM_OPERATOR_MODEL_PROVIDER"].set(model_provider_display(model_provider))
         profile_var = self.vars.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE")
         if profile_var:
-            profile_var.set("ollama-local" if model_provider == "ollama" else "lmstudio-local")
+            profile_var.set("")
+        port_var = self.vars.get("TELEGRAM_OPERATOR_LLM_PORT")
+        if port_var:
+            current_port = port_var.get().strip()
+            if model_provider == "ollama" and current_port in {"", "1234"}:
+                port_var.set("11434")
+            elif model_provider == "lmstudio" and current_port in {"", "11434"}:
+                port_var.set("1234")
         model_var = self.vars.get("TELEGRAM_OPERATOR_CODEX_MODEL")
         if self.model_combo and model_var:
             self.model_combo.configure(values=self._model_options(self.vars["TELEGRAM_OPERATOR_PROVIDER"].get(), model_var.get()))
+
+    def refresh_models(self) -> None:
+        model_var = self.vars.get("TELEGRAM_OPERATOR_CODEX_MODEL")
+        if not self.model_combo or not model_var:
+            return
+        options = self._model_options(self.vars["TELEGRAM_OPERATOR_PROVIDER"].get(), model_var.get().strip())
+        self.model_combo.configure(values=options)
+        if options and model_var.get().strip() not in options:
+            model_var.set(options[0])
+        self.set_status("Models refreshed", f"Found {len([item for item in options if item])} model option(s).", True)
 
     def _multi_path_entry(self, parent: ctk.CTkFrame, label: str, key: str, row: int) -> None:
         self.vars[key] = tk.StringVar(value=self.values.get(key, DEFAULTS[key]))
@@ -1117,7 +1137,8 @@ class OperatorUi(ctk.CTk):
             models = self._lm_studio_models()
             return models or JCODE_MODELS
         if model_provider == "ollama":
-            return ["gemma4:31b", "deepseek-coder:33b", "deepseek-coder:6.7b", "qwen3-coder-30b"]
+            models = self._ollama_models()
+            return models or ["gemma4:31b", "deepseek-coder:33b", "deepseek-coder:6.7b", "qwen3-coder-30b"]
         return ["", "auto"]
 
     def _lm_studio_models(self) -> list[str]:
@@ -1134,6 +1155,24 @@ class OperatorUi(ctk.CTk):
         models = []
         for item in payload.get("data", []):
             model_id = str(item.get("id") or "").strip()
+            if model_id:
+                models.append(model_id)
+        return sorted(dict.fromkeys(models))
+
+    def _ollama_models(self) -> list[str]:
+        host_var = self.vars.get("TELEGRAM_OPERATOR_REMOTE_HOST")
+        port_var = self.vars.get("TELEGRAM_OPERATOR_LLM_PORT")
+        host = host_var.get().strip() if host_var else self.values.get("TELEGRAM_OPERATOR_REMOTE_HOST", "127.0.0.1")
+        port = port_var.get().strip() if port_var else self.values.get("TELEGRAM_OPERATOR_LLM_PORT", "11434")
+        url = build_host_url(host, port, "/api/tags")
+        try:
+            with urlopen(url, timeout=1.5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, URLError, json.JSONDecodeError):
+            return []
+        models = []
+        for item in payload.get("models", []):
+            model_id = str(item.get("name") or item.get("model") or "").strip()
             if model_id:
                 models.append(model_id)
         return sorted(dict.fromkeys(models))
@@ -1170,12 +1209,7 @@ class OperatorUi(ctk.CTk):
         values["TELEGRAM_OPERATOR_MODEL_PROVIDER"] = model_provider_value(values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", ""))
         if values["TELEGRAM_OPERATOR_RUN_MODE"] == "local":
             values["TELEGRAM_OPERATOR_PROVIDER"] = "jcode"
-            if values["TELEGRAM_OPERATOR_MODEL_PROVIDER"] == "ollama":
-                values["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = "ollama-local"
-            elif values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE") in {"", "ollama-local"}:
-                values["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = "lmstudio-local"
-            if values["TELEGRAM_OPERATOR_MODEL_PROVIDER"] not in {"lmstudio", "ollama"}:
-                values["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = ""
+            values["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = ""
         elif values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower() not in CLOUD_HARNESSES:
             values["TELEGRAM_OPERATOR_PROVIDER"] = "codex"
         if values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower() == "codex" and values.get("TELEGRAM_OPERATOR_CODEX_MODEL") == "default":
@@ -1741,12 +1775,11 @@ class OperatorUi(ctk.CTk):
     def _desktop_backend_detail(self, values: dict[str, str]) -> str:
         provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "jcode").strip().lower()
         if provider == "jcode":
-            profile = values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "")
             jcode_provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "auto")
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "")
             return (
-                f"Backend details: jcode provider `{jcode_provider}`, profile `{profile}`, model `{model}`. "
-                "If the profile is `lmstudio-local`, the model is served locally through LM Studio."
+                f"Backend details: jcode harness, model provider `{jcode_provider}`, model `{model}`. "
+                "For LM Studio and Ollama, the selected model host and LLM port are used for model discovery."
             )
         if provider == "claude":
             return "Backend details: Claude CLI provider. The exact Claude model is controlled by the installed Claude CLI/account configuration."

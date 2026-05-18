@@ -2929,13 +2929,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
     def _agent_backend_prompt_block(self) -> str:
         provider = self.config.agent_provider.strip().lower()
         if provider == "jcode":
-            profile = self.config.jcode_provider_profile or "default"
             jcode_provider = self.config.jcode_provider_id or "auto"
             model = self.config.codex_model or "jcode default"
             return (
                 "Backend details: this instance is using jcode as the coding harness, "
-                f"provider `{jcode_provider}`, provider profile `{profile}`, and model `{model}`. "
-                "If the profile is `lmstudio-local`, the model is served locally through LM Studio."
+                f"model provider `{jcode_provider}`, and model `{model}`. "
+                "For LM Studio and Ollama, model discovery uses the configured model host and LLM port."
             )
         if provider == "codex":
             model = self.config.codex_model or "Codex CLI default"

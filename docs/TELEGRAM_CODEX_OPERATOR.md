@@ -74,7 +74,7 @@ Key settings:
 
 - `TELEGRAM_OPERATOR_PROVIDER`: selected harness, normally `jcode`, `codex`, or `claude`.
 - `TELEGRAM_OPERATOR_MODEL_PROVIDER`: JCode provider, for example `lmstudio`, `ollama`, or `openrouter`.
-- `TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE`: local JCode profile, for example `lmstudio-local`.
+- `TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE`: optional advanced JCode profile. Leave it empty for the normal UI flow.
 - `TELEGRAM_OPERATOR_JCODE_API_KEY`: optional key for hosted JCode providers.
 - `TELEGRAM_OPERATOR_CODEX_MODEL`: model name passed to the selected harness when supported.
 
