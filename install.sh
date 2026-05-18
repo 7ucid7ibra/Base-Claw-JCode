@@ -58,16 +58,26 @@ ask() {
   [[ "$reply" =~ ^[Yy]$ ]]
 }
 
+python_has_tkinter() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import tkinter
+PY
+}
+
 python_bin() {
-  if have python3.12; then
-    command -v python3.12
-  elif have python3.11; then
-    command -v python3.11
-  elif have python3; then
-    command -v python3
-  else
-    echo ""
-  fi
+  local fallback=""
+  local name path
+  for name in python3.12 python3.11 python3; do
+    if have "$name"; then
+      path="$(command -v "$name")"
+      [[ -z "$fallback" ]] && fallback="$path"
+      if python_has_tkinter "$path"; then
+        echo "$path"
+        return
+      fi
+    fi
+  done
+  echo "$fallback"
 }
 
 ensure_node_tool() {
@@ -185,7 +195,15 @@ setup_venv() {
     say "Python 3 was not found. Install Python 3.11+ first."
     exit 1
   fi
+  if [[ "$venv" == ".venv-telegram-agent" ]]; then
+    ensure_tkinter "$py"
+  fi
   if [[ ! -d "$venv" ]]; then
+    "$py" -m venv "$venv"
+  fi
+  if [[ "$venv" == ".venv-telegram-agent" ]] && ! python_has_tkinter "$venv/bin/python"; then
+    say "Recreating UI/operator virtual environment so it can see Tkinter."
+    rm -rf "$venv"
     "$py" -m venv "$venv"
   fi
   "$venv/bin/python" -m pip install --upgrade pip wheel
@@ -194,10 +212,7 @@ setup_venv() {
 
 ensure_tkinter() {
   local py="$1"
-  if "$py" - <<'PY' >/dev/null 2>&1
-import tkinter
-PY
-  then
+  if python_has_tkinter "$py"; then
     return
   fi
   say "Tkinter is not available for $("$py" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')."
@@ -209,10 +224,7 @@ PY
       brew install "$package"
     fi
   fi
-  if "$py" - <<'PY' >/dev/null 2>&1
-import tkinter
-PY
-  then
+  if python_has_tkinter "$py"; then
     return
   fi
   say "Tkinter is still unavailable. Install a Python build with Tkinter support, then rerun ./install.sh."
@@ -242,7 +254,6 @@ fi
 
 say "Setting up Python UI/operator environment..."
 setup_venv ".venv-telegram-agent" "requirements/telegram-operator.txt"
-ensure_tkinter ".venv-telegram-agent/bin/python"
 
 say "Checking optional coding providers..."
 ensure_node_tool "codex" "@openai/codex" "Codex CLI"
