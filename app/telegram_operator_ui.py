@@ -299,7 +299,7 @@ HELP_TEXT = {
     "Language code": "Speech language/accent code sent to Kokoro.",
     "Whisper model": "Whisper model size for voice note transcription. Larger models are slower but can be more accurate.",
     "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
-    "Update source": "Optional archive source for pulling BaseClaw updates. Use an SSH path like user@host:/folder, a local folder, or a direct .tar.gz path.",
+    "Update source": "Optional source for pulling BaseClaw updates. Use a GitHub repo URL, SSH artifact folder, local folder, or direct .tar.gz archive.",
 }
 
 ctk.set_appearance_mode("dark")
@@ -2163,7 +2163,7 @@ class OperatorUi(ctk.CTk):
         if not source:
             messagebox.showinfo(
                 "Update source needed",
-                "Enter an update source first. Use a Pi SSH folder like user@host:/folder, a local folder, or a direct .tar.gz path.",
+                "Enter an update source first. Use a GitHub repo URL, Pi SSH folder like user@host:/folder, a local folder, or a direct .tar.gz path.",
             )
             return
         if not messagebox.askyesno(
@@ -2219,6 +2219,10 @@ class OperatorUi(ctk.CTk):
             return False, str(exc)
 
     def _resolve_update_archive(self, source: str, tmp_path: Path) -> tuple[Path, str]:
+        github_repo = self._github_repo_from_source(source)
+        if github_repo:
+            return self._download_github_archive(github_repo, tmp_path)
+
         if source.startswith(("http://", "https://")):
             archive_path = tmp_path / Path(urlsplit(source).path).name
             if not archive_path.name.endswith(".tar.gz"):
@@ -2250,6 +2254,39 @@ class OperatorUi(ctk.CTk):
         if path.is_file():
             return path, path.name
         raise RuntimeError("Update source was not found.")
+
+    def _github_repo_from_source(self, source: str) -> tuple[str, str, str] | None:
+        parts = urlsplit(source)
+        if parts.netloc.lower() != "github.com":
+            return None
+        path_parts = [part for part in parts.path.strip("/").split("/") if part]
+        if len(path_parts) < 2:
+            return None
+        owner, repo = path_parts[0], path_parts[1]
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        branch = "main"
+        if len(path_parts) >= 5 and path_parts[2] in {"tree", "blob"}:
+            branch = path_parts[3]
+        return owner, repo, branch
+
+    def _download_github_archive(self, repo: tuple[str, str, str], tmp_path: Path) -> tuple[Path, str]:
+        owner, name, branch = repo
+        archive_path = tmp_path / f"{name}-{branch}.tar.gz"
+        gh = shutil.which("gh")
+        if not gh:
+            raise RuntimeError("GitHub update source requires GitHub CLI. Install gh and run gh auth login first.")
+        with archive_path.open("wb") as output:
+            result = subprocess.run(
+                [gh, "api", f"repos/{owner}/{name}/tarball/{branch}"],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                timeout=120,
+            )
+        if result.returncode != 0:
+            detail = (result.stderr or b"").decode("utf-8", errors="replace").strip() or "GitHub archive download failed"
+            raise RuntimeError(f"GitHub update failed. If the repo is private, run gh auth login first. Detail: {detail}")
+        return archive_path, f"github:{owner}/{name}@{branch}"
 
     def _looks_like_ssh_source(self, source: str) -> bool:
         return ":" in source and not source.startswith("/") and not source.startswith(("http://", "https://"))

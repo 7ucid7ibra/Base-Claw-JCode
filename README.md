@@ -37,7 +37,7 @@ After cloning the repository, run:
 
 The script is safe to rerun. It creates or updates the Python virtual environment, checks optional providers, offers to install Codex, Claude, and JCode, checks LM Studio and Ollama, optionally prepares Kokoro voice dependencies, creates `.env.telegram-operator` from the example if needed, and launches the UI.
 
-The Runtime panel also has an optional Update button. Set Update source to a local folder, direct `.tar.gz` file, or SSH folder containing `baseclaw-alpha-*.tar.gz` archives. Clicking Update overlays the newest archive onto the current install and then asks you to restart the UI manually.
+The Runtime panel also has an optional Update button. Set Update source to a GitHub repository URL, local folder, direct `.tar.gz` file, or SSH folder containing `baseclaw-alpha-*.tar.gz` archives. Private GitHub repositories require GitHub CLI to be installed and authenticated with `gh auth login`. Clicking Update overlays the newest archive onto the current install and then asks you to restart the UI manually.
 
 Useful options:
 
