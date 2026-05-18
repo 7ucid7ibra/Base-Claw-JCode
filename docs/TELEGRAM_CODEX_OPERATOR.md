@@ -79,6 +79,8 @@ Key settings:
 - `TELEGRAM_OPERATOR_JCODE_API_KEY`: optional key for hosted JCode providers.
 - `TELEGRAM_OPERATOR_CODEX_MODEL`: model name passed to the selected harness when supported.
 
+For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, and JCode does not reuse incompatible session ids.
+
 ## Safety And Access
 
 Access scope controls where the agent is allowed to work:

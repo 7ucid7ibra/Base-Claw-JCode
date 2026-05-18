@@ -242,6 +242,8 @@ The remote speech host field accepts a bare IP or hostname. The app adds `http:/
 
 Set the host field to `127.0.0.1` for local speech, or to another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
+When JCode is used with LM Studio or Ollama, BaseClaw creates or updates a JCode provider profile from the selected Host IP/name, LLM port, and model before running the agent. Session resume state is stored per harness, so switching between Claude, Codex, and JCode does not reuse stale session ids.
+
 If no workspace home is selected, the UI uses `agent_workspace` inside the project folder as the assistant's default home.
 
 That workspace starts with a small folder map: `agent/skills`, `agent/memory`, `agent/senses`, `work/prototypes`, `work/projects`, and `work/routines`. The map is documented in `agent_workspace/AGENT_HOME.md`.

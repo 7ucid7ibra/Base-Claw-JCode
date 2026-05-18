@@ -1832,7 +1832,7 @@ class OperatorUi(ctk.CTk):
                 chat_ids.append(int(part.strip()))
         return chat_ids
 
-    def _load_desktop_session_id(self, values: dict[str, str]) -> str | None:
+    def _load_desktop_session_id(self, values: dict[str, str], provider: str) -> str | None:
         state_path = Path(values.get("TELEGRAM_OPERATOR_STATE_PATH") or BASE_DIR / "telegram_operator_state.json")
         if not state_path.exists():
             return None
@@ -1843,9 +1843,12 @@ class OperatorUi(ctk.CTk):
         chat_id = self._first_allowed_chat_id(values)
         if chat_id is None:
             return None
+        provider = provider.strip().lower()
+        if provider:
+            return (data.get("provider_sessions") or {}).get(str(chat_id), {}).get(provider)
         return (data.get("sessions") or {}).get(str(chat_id))
 
-    def _save_desktop_session_id(self, session_id: str, values: dict[str, str]) -> None:
+    def _save_desktop_session_id(self, session_id: str, values: dict[str, str], provider: str) -> None:
         if not session_id:
             return
         state_path = Path(values.get("TELEGRAM_OPERATOR_STATE_PATH") or BASE_DIR / "telegram_operator_state.json")
@@ -1855,9 +1858,13 @@ class OperatorUi(ctk.CTk):
         except (OSError, json.JSONDecodeError):
             data = {}
         data.setdefault("sessions", {})
+        data.setdefault("provider_sessions", {})
         chat_id = self._first_allowed_chat_id(values)
         if chat_id is not None:
             data["sessions"][str(chat_id)] = session_id
+            provider = provider.strip().lower()
+            if provider:
+                data["provider_sessions"].setdefault(str(chat_id), {})[provider] = session_id
             state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def send_desktop_chat(self) -> None:
@@ -1876,12 +1883,19 @@ class OperatorUi(ctk.CTk):
     def _run_desktop_agent_turn(self, text: str, values: dict[str, str]) -> None:
         try:
             prompt = self._desktop_prompt(text, values)
-            session_id = self._load_desktop_session_id(values)
             provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "jcode").strip().lower() or "jcode"
+            session_id = self._load_desktop_session_id(values, provider)
             cmd, stdin_text = self._desktop_agent_command(provider, prompt, session_id, values)
             env = dict(os.environ)
             if provider == "jcode":
                 env["JCODE_NO_TELEMETRY"] = "1"
+                base_url = self._jcode_base_url(values)
+                if base_url:
+                    env["BASECLAW_JCODE_BASE_URL"] = base_url
+                    env["OPENAI_BASE_URL"] = base_url
+                    env["LM_STUDIO_BASE_URL"] = base_url
+                    if values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower() == "ollama":
+                        env["OLLAMA_HOST"] = base_url.removesuffix("/v1")
             result = subprocess.run(
                 cmd,
                 input=stdin_text,
@@ -1902,7 +1916,7 @@ class OperatorUi(ctk.CTk):
                 new_session_id = session_id or f"{provider}:latest"
                 reply = result.stdout.strip()
             if new_session_id:
-                self._save_desktop_session_id(new_session_id, values)
+                self._save_desktop_session_id(new_session_id, values, provider)
             self._append_desktop_history(
                 direction="out",
                 event_type="desktop_agent_reply",
@@ -1934,6 +1948,8 @@ class OperatorUi(ctk.CTk):
             profile = values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "").strip()
             jcode_provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip()
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
+            if not profile:
+                profile = self._ensure_jcode_local_profile(values)
             if profile:
                 cmd.extend(["--provider-profile", profile])
             elif jcode_provider:
@@ -2003,6 +2019,44 @@ class OperatorUi(ctk.CTk):
             capture_output=True,
             timeout=30,
         )
+
+    def _jcode_base_url(self, values: dict[str, str]) -> str:
+        provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
+        if provider == "ollama":
+            host = values.get("TELEGRAM_OPERATOR_REMOTE_HOST", "").strip() or "127.0.0.1"
+            port = values.get("TELEGRAM_OPERATOR_LLM_PORT", "").strip() or "11434"
+            return build_host_url(host, port, "/v1")
+        return values.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "").strip().rstrip("/")
+
+    def _ensure_jcode_local_profile(self, values: dict[str, str]) -> str:
+        provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
+        model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
+        base_url = self._jcode_base_url(values)
+        if provider not in {"lmstudio", "ollama"} or not model or not base_url:
+            return ""
+        profile = f"baseclaw-{provider}"
+        result = subprocess.run(
+            [
+                self._require_executable("jcode"),
+                "provider",
+                "add",
+                profile,
+                "--base-url",
+                base_url,
+                "--model",
+                model,
+                "--no-api-key",
+                "--auth",
+                "none",
+                "--overwrite",
+                "--quiet",
+            ],
+            cwd=values.get("TELEGRAM_OPERATOR_WORKDIR") or str(DEFAULT_WORKSPACE),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return profile if result.returncode == 0 else ""
 
     def _allowed_write_dirs(self, values: dict[str, str], execution_dir: Path) -> list[Path]:
         paths = [execution_dir]

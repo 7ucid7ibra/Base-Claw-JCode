@@ -366,6 +366,7 @@ class OperatorConfig:
     jcode_provider_id: str
     jcode_api_key: str
     jcode_provider_profile: str
+    jcode_base_url: str
     safety_mode: str
     safe_mode: bool
     supervisor_id: str
@@ -408,6 +409,7 @@ def startup_summary(config: OperatorConfig, *, source: str) -> str:
     ]
     if provider == "jcode":
         lines.append(f"Model provider: {config.jcode_provider_id or 'auto'}")
+        lines.append(f"Model base URL: {config.jcode_base_url or 'provider default'}")
     lines.extend(
         [
             f"Workspace: {config.workdir}",
@@ -463,24 +465,42 @@ class StateStore:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._data = {"sessions": {}}
+        self._data = {"sessions": {}, "provider_sessions": {}}
         if self.path.exists():
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
-            self._data = {"sessions": loaded.get("sessions", {})}
+            self._data = {
+                "sessions": loaded.get("sessions", {}),
+                "provider_sessions": loaded.get("provider_sessions", {}),
+            }
         self._data.setdefault("sessions", {})
+        self._data.setdefault("provider_sessions", {})
 
     def save(self) -> None:
         self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
 
-    def get_session_id(self, chat_id: int) -> Optional[str]:
+    def get_session_id(self, chat_id: int, provider: str = "") -> Optional[str]:
+        provider = provider.strip().lower()
+        if provider:
+            return self._data.get("provider_sessions", {}).get(str(chat_id), {}).get(provider)
         return self._data.get("sessions", {}).get(str(chat_id))
 
-    def set_session_id(self, chat_id: int, session_id: str) -> None:
+    def set_session_id(self, chat_id: int, session_id: str, provider: str = "") -> None:
         self._data.setdefault("sessions", {})[str(chat_id)] = session_id
+        provider = provider.strip().lower()
+        if provider:
+            self._data.setdefault("provider_sessions", {}).setdefault(str(chat_id), {})[provider] = session_id
         self.save()
 
-    def clear_session_id(self, chat_id: int) -> None:
+    def clear_session_id(self, chat_id: int, provider: str = "") -> None:
+        provider = provider.strip().lower()
+        if provider:
+            self._data.setdefault("provider_sessions", {}).setdefault(str(chat_id), {}).pop(provider, None)
+            if self._data.get("sessions", {}).get(str(chat_id), "").startswith(f"{provider}:"):
+                self._data.setdefault("sessions", {}).pop(str(chat_id), None)
+            self.save()
+            return
         self._data.setdefault("sessions", {}).pop(str(chat_id), None)
+        self._data.setdefault("provider_sessions", {}).pop(str(chat_id), None)
         self.save()
 
 
@@ -1392,6 +1412,7 @@ class LocalCliBridge:
         jcode_provider_profile: str = "",
         jcode_provider_id: str = "",
         jcode_api_key: str = "",
+        jcode_base_url: str = "",
     ):
         self.provider = provider
         self.workdir = workdir
@@ -1400,6 +1421,7 @@ class LocalCliBridge:
         self.jcode_provider_profile = jcode_provider_profile.strip()
         self.jcode_provider_id = jcode_provider_id.strip()
         self.jcode_api_key = jcode_api_key.strip()
+        self.jcode_base_url = jcode_base_url.strip().rstrip("/")
 
     def _command(self, prompt: str, session_id: Optional[str]) -> tuple[list[str], Optional[str]]:
         if self.provider == "claude":
@@ -1416,14 +1438,15 @@ class LocalCliBridge:
             return cmd, prompt
         if self.provider == "jcode":
             self._ensure_jcode_api_key()
+            profile = self.jcode_provider_profile or self._ensure_jcode_local_profile()
             cmd = [
                 self._jcode_executable(),
                 "--quiet",
                 "--no-update",
                 "--no-selfdev",
             ]
-            if self.jcode_provider_profile:
-                cmd.extend(["--provider-profile", self.jcode_provider_profile])
+            if profile:
+                cmd.extend(["--provider-profile", profile])
             elif self.jcode_provider_id:
                 cmd.extend(["--provider", self.jcode_provider_id])
             if self.model:
@@ -1462,6 +1485,38 @@ class LocalCliBridge:
             **hidden_subprocess_kwargs(),
         )
 
+    def _ensure_jcode_local_profile(self) -> str:
+        if self.jcode_provider_id not in {"lmstudio", "ollama"} or not self.jcode_base_url or not self.model:
+            return ""
+        profile = f"baseclaw-{self.jcode_provider_id}"
+        result = subprocess.run(
+            [
+                self._jcode_executable(),
+                "provider",
+                "add",
+                profile,
+                "--base-url",
+                self.jcode_base_url,
+                "--model",
+                self.model,
+                "--no-api-key",
+                "--auth",
+                "none",
+                "--overwrite",
+                "--quiet",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(self.workdir),
+            timeout=30,
+            **hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            LOGGER.warning("Failed to configure JCode local profile provider=%s base_url=%s error=%s", self.jcode_provider_id, self.jcode_base_url, detail)
+            return ""
+        return profile
+
     def _parse_jcode_output(self, output: str, fallback_session_id: Optional[str]) -> tuple[str, str]:
         try:
             payload = json.loads(output)
@@ -1480,6 +1535,12 @@ class LocalCliBridge:
         env = agent_subprocess_env()
         if self.provider == "jcode":
             env.setdefault("JCODE_NO_TELEMETRY", "1")
+            if self.jcode_base_url:
+                env["BASECLAW_JCODE_BASE_URL"] = self.jcode_base_url
+                env["OPENAI_BASE_URL"] = self.jcode_base_url
+                env["LM_STUDIO_BASE_URL"] = self.jcode_base_url
+                if self.jcode_provider_id == "ollama":
+                    env["OLLAMA_HOST"] = self.jcode_base_url.removesuffix("/v1")
         try:
             process = subprocess.run(
                 cmd,
@@ -1527,6 +1588,7 @@ def build_agent_bridge(config: OperatorConfig):
             config.jcode_provider_profile,
             config.jcode_provider_id,
             config.jcode_api_key,
+            config.jcode_base_url,
         )
     return GenericCliBridge(provider, config.workdir, config.agent_command, config.agent_timeout_seconds)
 
@@ -2982,7 +3044,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             model = self.config.codex_model or "jcode default"
             return (
                 "Backend details: this instance is using jcode as the coding harness, "
-                f"model provider `{jcode_provider}`, and model `{model}`. "
+                f"model provider `{jcode_provider}`, model `{model}`, and base URL `{self.config.jcode_base_url or 'provider default'}`. "
                 "For LM Studio and Ollama, model discovery uses the configured model host and LLM port."
             )
         if provider == "codex":
@@ -3022,7 +3084,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
 
         async with self._lock_for(chat_id):
-            session_id = self.state.get_session_id(chat_id)
+            session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
             action = ChatAction.RECORD_VOICE if transcript else ChatAction.TYPING
             if keepalive is None:
                 keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, action))
@@ -3075,7 +3137,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 reply_text = f"{reply_text}\n\nCode mode git safety: committed " + " and ".join(notes) + "."
 
             if new_session_id:
-                self.state.set_session_id(chat_id, new_session_id)
+                self.state.set_session_id(chat_id, new_session_id, self.config.agent_provider)
 
             self.memory_log.append(
                 {
@@ -3162,19 +3224,21 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await self._send_text_message(
             context,
             chat_id,
-            "Reset clears this chat's persisted Codex session. Are you sure?",
+            "Reset clears this chat's persisted sessions for all harnesses. Are you sure?",
             event_type="command_reset_confirm",
             reply_markup=keyboard,
         )
 
     def _status_text(self, chat_id: int) -> str:
-        session_id = self.state.get_session_id(chat_id)
+        session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
         try:
             codex_status = f"available at {codex_executable()}"
         except RuntimeError as exc:
             codex_status = str(exc)
         return (
             f"Provider: {self.config.agent_provider}\n"
+            f"Model provider: {self.config.jcode_provider_id or 'n/a'}\n"
+            f"Model/base URL: {self.config.codex_model or 'default'} / {self.config.jcode_base_url or 'provider default'}\n"
             f"Workdir: {self.config.workdir}\n"
             f"Session: {session_id or 'none'}\n"
             f"Access scope: {self.config.access_scope}\n"
@@ -4328,7 +4392,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         self.state.clear_session_id(chat_id)
         await query.answer("Session reset.")
-        await query.edit_message_text("Cleared the persisted Codex session for this chat.")
+        await query.edit_message_text("Cleared the persisted sessions for this chat.")
 
     async def on_menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -4700,6 +4764,12 @@ def load_config() -> OperatorConfig:
             f"{supervisor_id},{history_agent_name},developer-agent",
         )
     )
+    jcode_provider_id = os.environ.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
+    jcode_base_url = os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    if jcode_provider_id == "ollama":
+        remote_host = os.environ.get("TELEGRAM_OPERATOR_REMOTE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        llm_port = os.environ.get("TELEGRAM_OPERATOR_LLM_PORT", "11434").strip() or "11434"
+        jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
         allowed_chat_ids=parse_allowed_chat_ids(require_env("TELEGRAM_ALLOWED_CHAT_IDS")),
@@ -4721,9 +4791,10 @@ def load_config() -> OperatorConfig:
         agent_command=os.environ.get("TELEGRAM_OPERATOR_AGENT_COMMAND", ""),
         agent_timeout_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS", ""), 900),
         codex_model=os.environ.get("TELEGRAM_OPERATOR_CODEX_MODEL", ""),
-        jcode_provider_id=os.environ.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", ""),
+        jcode_provider_id=jcode_provider_id,
         jcode_api_key=os.environ.get("TELEGRAM_OPERATOR_JCODE_API_KEY", ""),
         jcode_provider_profile=os.environ.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", ""),
+        jcode_base_url=jcode_base_url,
         safety_mode=safety_mode,
         safe_mode=action_mode != "full" or access_scope != "full",
         supervisor_id=supervisor_id,
