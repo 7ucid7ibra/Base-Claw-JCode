@@ -94,15 +94,60 @@ ensure_jcode() {
     say "JCode found: $(command -v jcode)"
     return
   fi
-  if ! have brew; then
-    say "JCode not found, and Homebrew is not installed. Skipping."
+  if have brew && ask "Install JCode with Homebrew?" "y"; then
+    brew tap 1jehuang/jcode || true
+    if brew install 1jehuang/jcode/jcode; then
+      return
+    fi
+    say "Homebrew could not install JCode. Trying direct release download instead."
+    install_jcode_release || say "Direct JCode install failed. You can still use Codex or Claude."
     return
   fi
-  if ask "Install JCode with Homebrew?" "y"; then
-    brew tap 1jehuang/jcode || true
-    brew install 1jehuang/jcode/jcode
+  if ask "Install JCode from the GitHub release into ~/.local/bin?" "y"; then
+    install_jcode_release || say "Direct JCode install failed. You can still use Codex or Claude."
   else
     say "Skipped JCode."
+  fi
+}
+
+install_jcode_release() {
+  local version="0.12.2"
+  local os arch asset bin_name url tmpdir target_dir target
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  case "$os:$arch" in
+    Darwin:arm64) asset="jcode-macos-aarch64.tar.gz"; bin_name="jcode-macos-aarch64" ;;
+    Darwin:x86_64) asset="jcode-macos-x86_64.tar.gz"; bin_name="jcode-macos-x86_64" ;;
+    Linux:aarch64|Linux:arm64) asset="jcode-linux-aarch64.tar.gz"; bin_name="jcode-linux-aarch64" ;;
+    Linux:x86_64) asset="jcode-linux-x86_64.tar.gz"; bin_name="jcode-linux-x86_64" ;;
+    *)
+      say "No direct JCode release mapping for $os/$arch."
+      return 1
+      ;;
+  esac
+  if ! have curl; then
+    say "curl is required for direct JCode install."
+    return 1
+  fi
+  if ! have tar; then
+    say "tar is required for direct JCode install."
+    return 1
+  fi
+  tmpdir="$(mktemp -d)"
+  url="https://github.com/1jehuang/jcode/releases/download/v${version}/${asset}"
+  say "Downloading JCode $version for $os/$arch..."
+  curl -fL "$url" -o "$tmpdir/$asset"
+  tar -xzf "$tmpdir/$asset" -C "$tmpdir"
+  target_dir="$HOME/.local/bin"
+  mkdir -p "$target_dir"
+  target="$target_dir/jcode"
+  install -m 755 "$tmpdir/$bin_name" "$target"
+  rm -rf "$tmpdir"
+  if ! have jcode; then
+    say "Installed JCode to $target."
+    say "Add this to PATH if needed: export PATH=\"\$HOME/.local/bin:\$PATH\""
+  else
+    say "JCode installed: $(command -v jcode)"
   fi
 }
 
