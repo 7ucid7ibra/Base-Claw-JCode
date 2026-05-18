@@ -192,6 +192,33 @@ setup_venv() {
   "$venv/bin/python" -m pip install -r "$requirements"
 }
 
+ensure_tkinter() {
+  local py="$1"
+  if "$py" - <<'PY' >/dev/null 2>&1
+import tkinter
+PY
+  then
+    return
+  fi
+  say "Tkinter is not available for $("$py" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')."
+  if [[ "$(uname -s)" == "Darwin" ]] && have brew; then
+    local minor package
+    minor="$("$py" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    package="python-tk@${minor}"
+    if ask "Install $package with Homebrew so the desktop UI can launch?" "y"; then
+      brew install "$package"
+    fi
+  fi
+  if "$py" - <<'PY' >/dev/null 2>&1
+import tkinter
+PY
+  then
+    return
+  fi
+  say "Tkinter is still unavailable. Install a Python build with Tkinter support, then rerun ./install.sh."
+  exit 1
+}
+
 setup_kokoro() {
   if [[ "$WITH_KOKORO" == "0" ]]; then
     say "Skipping Kokoro setup."
@@ -215,6 +242,7 @@ fi
 
 say "Setting up Python UI/operator environment..."
 setup_venv ".venv-telegram-agent" "requirements/telegram-operator.txt"
+ensure_tkinter ".venv-telegram-agent/bin/python"
 
 say "Checking optional coding providers..."
 ensure_node_tool "codex" "@openai/codex" "Codex CLI"
