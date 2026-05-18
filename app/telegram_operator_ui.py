@@ -564,7 +564,14 @@ class OperatorUi(ctk.CTk):
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
         self.harness_combo: ctk.CTkComboBox | None = None
+        self.local_provider_label: ctk.CTkLabel | None = None
+        self.local_provider_combo: ctk.CTkComboBox | None = None
+        self.model_label: ctk.CTkLabel | None = None
+        self.model_picker: ctk.CTkFrame | None = None
         self.model_combo: ctk.CTkComboBox | None = None
+        self.model_refresh_button: ctk.CTkButton | None = None
+        self.api_key_label: ctk.CTkLabel | None = None
+        self.api_key_entry: ctk.CTkEntry | None = None
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.log_box: ctk.CTkTextbox | None = None
@@ -700,8 +707,8 @@ class OperatorUi(ctk.CTk):
         self.vars["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = tk.StringVar(
             value=self.values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "").strip()
         )
-        self._label(agent_options, "Local model provider", row=2, column=0, padx=(0, 6))
-        ctk.CTkComboBox(
+        self.local_provider_label = self._label(agent_options, "Local model provider", row=2, column=0, padx=(0, 6))
+        self.local_provider_combo = ctk.CTkComboBox(
             agent_options,
             variable=self.vars["TELEGRAM_OPERATOR_MODEL_PROVIDER"],
             values=MODEL_PROVIDER_OPTIONS,
@@ -709,13 +716,14 @@ class OperatorUi(ctk.CTk):
             height=38,
             corner_radius=10,
             border_width=1,
-        ).grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
-        self._label(agent_options, "Model", row=2, column=1, padx=(6, 0))
-        model_picker = ctk.CTkFrame(agent_options, fg_color="transparent")
-        model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
-        model_picker.grid_columnconfigure(0, weight=1)
+        )
+        self.local_provider_combo.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
+        self.model_label = self._label(agent_options, "Model", row=2, column=1, padx=(6, 0))
+        self.model_picker = ctk.CTkFrame(agent_options, fg_color="transparent")
+        self.model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+        self.model_picker.grid_columnconfigure(0, weight=1)
         self.model_combo = ctk.CTkComboBox(
-            model_picker,
+            self.model_picker,
             variable=self.vars["TELEGRAM_OPERATOR_CODEX_MODEL"],
             values=self._model_options(provider, model),
             height=38,
@@ -723,23 +731,31 @@ class OperatorUi(ctk.CTk):
             border_width=1,
         )
         self.model_combo.grid(row=0, column=0, sticky="ew")
-        ctk.CTkButton(
-            model_picker,
+        self.model_refresh_button = ctk.CTkButton(
+            self.model_picker,
             text="Refresh",
             width=82,
             height=38,
             corner_radius=10,
             command=self.refresh_models,
-        ).grid(row=0, column=1, padx=(8, 0))
-        self._entry(
-            agent_options,
-            "JCode API key",
-            "TELEGRAM_OPERATOR_JCODE_API_KEY",
-            row=4,
-            secret=True,
-            column=0,
-            padx=(0, 6),
         )
+        self.model_refresh_button.grid(row=0, column=1, padx=(8, 0))
+        self.vars["TELEGRAM_OPERATOR_JCODE_API_KEY"] = tk.StringVar(
+            value=self.values.get("TELEGRAM_OPERATOR_JCODE_API_KEY", DEFAULTS["TELEGRAM_OPERATOR_JCODE_API_KEY"])
+        )
+        self.api_key_label = self._label(agent_options, "API key for selected provider", row=4, column=0, padx=(0, 6))
+        self.api_key_entry = ctk.CTkEntry(
+            agent_options,
+            textvariable=self.vars["TELEGRAM_OPERATOR_JCODE_API_KEY"],
+            show="*",
+            height=38,
+            corner_radius=10,
+            border_width=1,
+            fg_color=COLORS["panel"],
+            border_color=COLORS["border"],
+            text_color=COLORS["text"],
+        )
+        self.api_key_entry.grid(row=5, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
         self._entry(
             agent_options,
             "Agent timeout seconds",
@@ -748,6 +764,7 @@ class OperatorUi(ctk.CTk):
             column=1,
             padx=(6, 0),
         )
+        self._sync_agent_option_visibility()
         access_scope = self.values.get("TELEGRAM_OPERATOR_ACCESS_SCOPE", "").strip()
         action_mode = self.values.get("TELEGRAM_OPERATOR_ACTION_MODE", "").strip()
         safety_value = self.values.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip()
@@ -972,10 +989,10 @@ class OperatorUi(ctk.CTk):
         row: int,
         column: int = 0,
         padx: tuple[int, int] = (0, 0),
-    ) -> None:
-        ctk.CTkLabel(parent, text=text, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w").grid(
-            row=row, column=column, sticky="ew", padx=padx
-        )
+    ) -> ctk.CTkLabel:
+        label = ctk.CTkLabel(parent, text=text, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w")
+        label.grid(row=row, column=column, sticky="ew", padx=padx)
+        return label
 
     def _entry(
         self,
@@ -1076,6 +1093,7 @@ class OperatorUi(ctk.CTk):
         model_var = self.vars.get("TELEGRAM_OPERATOR_CODEX_MODEL")
         if self.model_combo and model_var:
             self.model_combo.configure(values=self._model_options(self.vars["TELEGRAM_OPERATOR_PROVIDER"].get(), model_var.get()))
+        self._sync_agent_option_visibility()
 
     def refresh_models(self) -> None:
         model_var = self.vars.get("TELEGRAM_OPERATOR_CODEX_MODEL")
@@ -1117,6 +1135,55 @@ class OperatorUi(ctk.CTk):
             model_var.set("")
         if self.model_combo:
             self.model_combo.configure(values=self._model_options(provider, model_var.get().strip()))
+        self._sync_agent_option_visibility()
+
+    def _sync_agent_option_visibility(self) -> None:
+        mode_var = self.vars.get("TELEGRAM_OPERATOR_RUN_MODE")
+        provider_var = self.vars.get("TELEGRAM_OPERATOR_PROVIDER")
+        model_provider_var = self.vars.get("TELEGRAM_OPERATOR_MODEL_PROVIDER")
+        mode = run_mode_value(mode_var.get()) if mode_var else "local"
+        provider = provider_var.get().strip().lower() if provider_var else "jcode"
+        model_provider = model_provider_value(model_provider_var.get()) if model_provider_var else "lmstudio"
+        local_mode = mode == "local" and provider == "jcode"
+
+        if self.local_provider_label and self.local_provider_combo:
+            if local_mode:
+                self.local_provider_label.grid(row=2, column=0, sticky="ew", padx=(0, 6))
+                self.local_provider_combo.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
+            else:
+                self.local_provider_label.grid_remove()
+                self.local_provider_combo.grid_remove()
+
+        if self.model_label and self.model_picker:
+            if provider == "claude":
+                self.model_label.grid_remove()
+                self.model_picker.grid_remove()
+            elif local_mode:
+                self.model_label.configure(text="Model")
+                self.model_label.grid(row=2, column=1, sticky="ew", padx=(6, 0))
+                self.model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
+            else:
+                self.model_label.configure(text="Codex model")
+                self.model_label.grid(row=2, column=0, sticky="ew", padx=(0, 6))
+                self.model_picker.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
+
+        if self.model_refresh_button:
+            if local_mode:
+                self.model_refresh_button.grid(row=0, column=1, padx=(8, 0))
+            else:
+                self.model_refresh_button.grid_remove()
+
+        no_key_providers = {"lmstudio", "ollama", "jcode", "claude", "cursor", "copilot", "gemini", "antigravity", "google", "auto"}
+        api_key_needed = local_mode and model_provider not in no_key_providers
+        if self.api_key_label and self.api_key_entry:
+            if api_key_needed:
+                provider_label = MODEL_PROVIDER_LABELS.get(model_provider, model_provider)
+                self.api_key_label.configure(text=f"{provider_label} API key")
+                self.api_key_label.grid(row=4, column=0, sticky="ew", padx=(0, 6))
+                self.api_key_entry.grid(row=5, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
+            else:
+                self.api_key_label.grid_remove()
+                self.api_key_entry.grid_remove()
 
     def _model_options(self, provider: str, model: str) -> list[str]:
         provider = provider.strip().lower()
