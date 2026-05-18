@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from urllib.error import URLError
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import urlopen
 
 import customtkinter as ctk
@@ -696,6 +696,7 @@ class OperatorUi(ctk.CTk):
         self.refresh_voices()
         self.refresh_status()
         self.refresh_chat_history()
+        self.after(900, self.send_ui_startup_notice)
         self.after(5000, self.auto_refresh_status)
 
     def _build(self) -> None:
@@ -1536,6 +1537,62 @@ class OperatorUi(ctk.CTk):
         if show_message:
             messagebox.showinfo("Saved", f"Saved settings to {ENV_PATH}")
 
+    def send_ui_startup_notice(self) -> None:
+        values = self.current_values()
+        if not parse_bool(values.get("TELEGRAM_OPERATOR_STARTUP_NOTICE", ""), True):
+            return
+        token = values.get("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_ids = self._allowed_chat_ids(values)
+        if not token or not chat_ids:
+            return
+        text = self._ui_startup_summary(values)
+
+        def worker() -> None:
+            failures = []
+            for chat_id in chat_ids:
+                try:
+                    self._post_telegram_message(token, chat_id, text)
+                except Exception as exc:
+                    failures.append(str(exc))
+            if failures:
+                self.after(0, lambda: self.set_status("Notice failed", failures[0], False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _post_telegram_message(self, token: str, chat_id: int, text: str) -> None:
+        payload = urlencode({"chat_id": str(chat_id), "text": text}).encode("utf-8")
+        with urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, timeout=8) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Telegram sendMessage failed with HTTP {response.status}")
+
+    def _ui_startup_summary(self, values: dict[str, str]) -> str:
+        provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "jcode").strip().lower() or "jcode"
+        run_mode = run_mode_display(values.get("TELEGRAM_OPERATOR_RUN_MODE", "local"))
+        model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
+        if not model:
+            model = "Claude CLI default" if provider == "claude" else "Codex CLI default" if provider == "codex" else "JCode default"
+        lines = [
+            "BaseClaw UI opened.",
+            f"Mode: {run_mode}",
+            f"Harness: {provider}",
+            f"Model: {model}",
+        ]
+        if provider == "jcode":
+            lines.append(f"Model provider: {model_provider_display(values.get('TELEGRAM_OPERATOR_MODEL_PROVIDER', 'lmstudio'))}")
+        lines.extend(
+            [
+                f"Workspace: {values.get('TELEGRAM_OPERATOR_WORKDIR', '')}",
+                f"Access: {access_scope_display(values.get('TELEGRAM_OPERATOR_ACCESS_SCOPE', 'workspace'))}",
+                f"Actions: {action_mode_display(values.get('TELEGRAM_OPERATOR_ACTION_MODE', 'full'))}",
+                f"Voice replies: {'on' if parse_bool(values.get('TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED', ''), True) else 'off'}",
+                f"Voice: {values.get('TELEGRAM_OPERATOR_KOKORO_VOICE', '')}",
+                f"Whisper: {values.get('TELEGRAM_OPERATOR_WHISPER_MODEL', '')}",
+                f"STT/TTS: {values.get('TELEGRAM_OPERATOR_REMOTE_SPEECH_URL', '') or 'not configured'}",
+                f"Update source: {'configured' if values.get('TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE', '').strip() else 'not configured'}",
+            ]
+        )
+        return "\n".join(lines)
+
     def refresh_voices(self) -> None:
         urls = []
         host_var = self.vars.get("TELEGRAM_OPERATOR_REMOTE_HOST")
@@ -1764,11 +1821,16 @@ class OperatorUi(ctk.CTk):
             )
 
     def _first_allowed_chat_id(self, values: dict[str, str]) -> int | None:
+        chat_ids = self._allowed_chat_ids(values)
+        return chat_ids[0] if chat_ids else None
+
+    def _allowed_chat_ids(self, values: dict[str, str]) -> list[int]:
         raw = values.get("TELEGRAM_ALLOWED_CHAT_IDS", "")
+        chat_ids = []
         for part in re.split(r"[,\\s]+", raw):
             if part.strip().lstrip("-").isdigit():
-                return int(part.strip())
-        return None
+                chat_ids.append(int(part.strip()))
+        return chat_ids
 
     def _load_desktop_session_id(self, values: dict[str, str]) -> str | None:
         state_path = Path(values.get("TELEGRAM_OPERATOR_STATE_PATH") or BASE_DIR / "telegram_operator_state.json")

@@ -398,6 +398,43 @@ class OperatorConfig:
     voice_replies_enabled: bool
 
 
+def startup_summary(config: OperatorConfig, *, source: str) -> str:
+    provider = config.agent_provider.strip().lower() or "unknown"
+    model = config.codex_model.strip() or ("Claude CLI default" if provider == "claude" else "Codex CLI default" if provider == "codex" else "JCode default")
+    lines = [
+        f"BaseClaw {source} online.",
+        f"Harness: {provider}",
+        f"Model: {model}",
+    ]
+    if provider == "jcode":
+        lines.append(f"Model provider: {config.jcode_provider_id or 'auto'}")
+    lines.extend(
+        [
+            f"Workspace: {config.workdir}",
+            f"Access: {config.access_scope}",
+            f"Actions: {config.action_mode}",
+            f"Voice replies: {'on' if config.voice_replies_enabled else 'off'}",
+            f"Voice: {config.kokoro_voice}",
+            f"Whisper: {config.whisper_model_name}",
+            f"STT/TTS hosts: {', '.join(config.kokoro_urls) if config.kokoro_urls else 'none'}",
+            f"Timeout: {config.agent_timeout_seconds}s",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def friendly_voice_error(exc: Exception) -> str:
+    detail = str(exc)
+    lower = detail.lower()
+    if "timed out" in lower or "connecttimeout" in lower:
+        return "STT/TTS host timed out. Check the Host IP and STT/TTS port, or turn voice replies off for this test."
+    if "connection refused" in lower or "failed to establish" in lower:
+        return "STT/TTS host is not accepting connections. Start the speech server, fix the host/port, or turn voice replies off."
+    if "all kokoro hosts failed" in lower:
+        return "All STT/TTS hosts failed. Check the speech server settings or turn voice replies off."
+    return detail[:500]
+
+
 @dataclass
 class PendingApproval:
     chat_id: int
@@ -2854,10 +2891,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await self._send_voice_reply(context, chat_id, text)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
+            voice_error = friendly_voice_error(exc)
             fallback = (
-                f"{text}\n\n[Voice reply failed: {exc}]"
+                f"{text}\n\n[Voice reply failed: {voice_error}]"
                 if len(text) <= 3200
-                else f"Voice reply failed: {exc}"
+                else f"Voice reply failed: {voice_error}"
             )
             await self._send_text_chunks(context, chat_id, fallback)
         else:
@@ -3094,10 +3132,10 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await self._send_text_message(
             context,
             update.effective_chat.id,
-            "BaseClaw is online. Send text or voice notes.",
+            startup_summary(self.config, source="operator"),
             event_type="command_start_reply",
         )
-        await self._send_voice_reply(context, update.effective_chat.id, "BaseClaw is online.")
+        await self._send_voice_reply(context, update.effective_chat.id, "BaseClaw operator is online.")
 
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -4783,13 +4821,7 @@ async def main() -> None:
             try:
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=(
-                        "BaseClaw is online.\n"
-                        f"Voice: {config.kokoro_voice}\n"
-                        f"Access: {config.access_scope}\n"
-                        f"Actions: {config.action_mode}\n"
-                        f"Speech hosts: {', '.join(config.kokoro_urls) or 'none'}"
-                    ),
+                    text=startup_summary(config, source="operator"),
                 )
             except Exception:
                 LOGGER.exception("Failed to send startup notice chat_id=%s", chat_id)
