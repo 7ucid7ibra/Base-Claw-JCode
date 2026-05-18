@@ -238,7 +238,7 @@ For speech hosting, `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the only visible ho
 
 The remote speech host field accepts a bare IP or hostname. The app adds `http://` and port `8766` automatically when they are omitted.
 
-Set the host field to `127.0.0.1` for local speech, or to another reachable IP/hostname for a separate speech host. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
+Set the host field to `127.0.0.1` for local speech, or to another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
 If no workspace home is selected, the UI uses `agent_workspace` inside the project folder as the assistant's default home.
 

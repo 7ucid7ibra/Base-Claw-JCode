@@ -675,7 +675,7 @@ class OperatorUi(ctk.CTk):
         host_row.grid(row=4, column=0, sticky="ew")
         host_row.grid_columnconfigure((0, 1, 2), weight=1, uniform="host")
         self._entry(host_row, "Host IP / name", "TELEGRAM_OPERATOR_REMOTE_HOST", row=0, column=0, padx=(0, 6))
-        self._entry(host_row, "Speech port", "TELEGRAM_OPERATOR_SPEECH_PORT", row=0, column=1, padx=6)
+        self._entry(host_row, "STT/TTS port", "TELEGRAM_OPERATOR_SPEECH_PORT", row=0, column=1, padx=6)
         self._entry(host_row, "LLM port", "TELEGRAM_OPERATOR_LLM_PORT", row=0, column=2, padx=(6, 0))
 
         agent = self._card(settings_body, "Agent", "Harness, model provider, workspace, and safety controls.", 3, 0)

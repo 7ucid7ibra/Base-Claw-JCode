@@ -99,7 +99,7 @@ Legacy `TELEGRAM_OPERATOR_SAFETY_MODE` and `TELEGRAM_OPERATOR_SAFE_MODE` are kep
 Kokoro and Whisper can run locally or on a separate reachable host.
 
 - `TELEGRAM_OPERATOR_REMOTE_HOST` is the shared host for speech and local model services.
-- `TELEGRAM_OPERATOR_SPEECH_PORT` is the Kokoro/Whisper service port.
+- `TELEGRAM_OPERATOR_SPEECH_PORT` is the STT/TTS service port for Whisper transcription and Kokoro voice output.
 - `TELEGRAM_OPERATOR_LLM_PORT` is the LM Studio or compatible local model API port.
 - `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK` is an advanced compatibility flag. Normal installs use the configured host and speech port directly; `127.0.0.1` means local speech.
 
