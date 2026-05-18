@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 import tkinter as tk
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
@@ -296,6 +299,7 @@ HELP_TEXT = {
     "Language code": "Speech language/accent code sent to Kokoro.",
     "Whisper model": "Whisper model size for voice note transcription. Larger models are slower but can be more accurate.",
     "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
+    "Update source": "Optional archive source for pulling BaseClaw updates. Use an SSH path like user@host:/folder, a local folder, or a direct .tar.gz path.",
 }
 
 ctk.set_appearance_mode("dark")
@@ -670,6 +674,7 @@ class OperatorUi(ctk.CTk):
         self.timeout_entry: ctk.CTkEntry | None = None
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
+        self.update_button: ctk.CTkButton | None = None
         self.log_box: ctk.CTkTextbox | None = None
         self.chat_scroll: ctk.CTkScrollableFrame | None = None
         self.chat_input: ctk.CTkTextbox | None = None
@@ -954,7 +959,7 @@ class OperatorUi(ctk.CTk):
         runtime = self._card(settings_body, "Runtime", "Start, stop, and keep an eye on the bridge.", 0, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        buttons.grid_columnconfigure((0, 1, 2), weight=1)
+        buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
         ctk.CTkButton(buttons, text="Start", height=40, corner_radius=12, command=self.start_operator).grid(
             row=0, column=0, sticky="ew", padx=(0, 6)
         )
@@ -976,8 +981,19 @@ class OperatorUi(ctk.CTk):
             hover_color=COLORS["border"],
             command=self.restart_operator,
         ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        self.update_button = ctk.CTkButton(
+            buttons,
+            text="Update",
+            height=40,
+            corner_radius=12,
+            fg_color=COLORS["panel_lift"],
+            hover_color=COLORS["border"],
+            command=self.update_from_source,
+        )
+        self.update_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
         self.status_detail = ctk.CTkLabel(runtime, text="Status: checking...", text_color=COLORS["muted"], anchor="w")
         self.status_detail.grid(row=1, column=0, sticky="ew")
+        self._entry(runtime, "Update source", "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", row=2)
 
         logs = self._card(settings_body, "Recent Log", "Latest bridge activity.", 4, 0)
         logs.grid_rowconfigure(0, weight=1)
@@ -2078,6 +2094,158 @@ class OperatorUi(ctk.CTk):
         self.save(show_message=False)
         self.stop_operator()
         self.after(1800, self.start_operator)
+
+    def update_from_source(self) -> None:
+        self.save(show_message=False)
+        source = self.current_values().get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "").strip()
+        if not source:
+            messagebox.showinfo(
+                "Update source needed",
+                "Enter an update source first. Use a Pi SSH folder like user@host:/folder, a local folder, or a direct .tar.gz path.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Update BaseClaw",
+            "Pull the newest BaseClaw alpha archive from the update source and overlay it onto this install?\n\nRestart the UI manually after it finishes.",
+        ):
+            return
+        if self.update_button:
+            self.update_button.configure(state="disabled", text="Updating")
+        self.set_status("Updating", "Pulling latest BaseClaw archive...", None)
+
+        def worker() -> None:
+            ok, detail = self._pull_archive_update(source)
+            self.after(0, lambda: self._finish_update(ok, detail))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update(self, ok: bool, detail: str) -> None:
+        if self.update_button:
+            self.update_button.configure(state="normal", text="Update")
+        if ok:
+            self.set_status("Updated", detail, True)
+            messagebox.showinfo("Update complete", detail)
+        else:
+            self.set_status("Update failed", detail, False)
+            messagebox.showerror("Update failed", detail)
+
+    def _pull_archive_update(self, source: str) -> tuple[bool, str]:
+        try:
+            if (PROJECT_ROOT / ".git").exists():
+                dirty = subprocess.run(
+                    ["git", "status", "--short"],
+                    cwd=str(PROJECT_ROOT),
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                )
+                if dirty.returncode == 0 and dirty.stdout.strip():
+                    return False, "Update blocked because the local git worktree has uncommitted changes."
+
+            with tempfile.TemporaryDirectory(prefix="baseclaw-update-") as tmp:
+                tmp_path = Path(tmp)
+                archive_path, archive_name = self._resolve_update_archive(source, tmp_path)
+                extract_dir = tmp_path / "extract"
+                extract_dir.mkdir()
+                with tarfile.open(archive_path, "r:gz") as archive:
+                    self._safe_extract(archive, extract_dir)
+                roots = [item for item in extract_dir.iterdir() if item.is_dir()]
+                source_root = roots[0] if len(roots) == 1 else extract_dir
+                copied = self._overlay_update(source_root)
+                return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code."
+        except Exception as exc:
+            return False, str(exc)
+
+    def _resolve_update_archive(self, source: str, tmp_path: Path) -> tuple[Path, str]:
+        if source.startswith(("http://", "https://")):
+            archive_path = tmp_path / Path(urlsplit(source).path).name
+            if not archive_path.name.endswith(".tar.gz"):
+                archive_path = tmp_path / "baseclaw-alpha-latest.tar.gz"
+            with urlopen(source, timeout=45) as response:
+                archive_path.write_bytes(response.read())
+            return archive_path, archive_path.name
+
+        if self._looks_like_ssh_source(source):
+            host, remote_path = source.split(":", 1)
+            remote_archive = self._latest_remote_archive(host, remote_path)
+            archive_path = tmp_path / Path(remote_archive).name
+            scp = subprocess.run(
+                ["scp", "-q", "-o", "BatchMode=yes", f"{host}:{remote_archive}", str(archive_path)],
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            if scp.returncode != 0:
+                raise RuntimeError((scp.stderr or scp.stdout).strip() or "scp failed")
+            return archive_path, archive_path.name
+
+        path = Path(source).expanduser()
+        if path.is_dir():
+            matches = sorted(path.glob("baseclaw-alpha-*.tar.gz"), key=lambda item: item.stat().st_mtime, reverse=True)
+            if not matches:
+                raise RuntimeError(f"No baseclaw-alpha archives found in {path}")
+            return matches[0], matches[0].name
+        if path.is_file():
+            return path, path.name
+        raise RuntimeError("Update source was not found.")
+
+    def _looks_like_ssh_source(self, source: str) -> bool:
+        return ":" in source and not source.startswith("/") and not source.startswith(("http://", "https://"))
+
+    def _latest_remote_archive(self, host: str, remote_path: str) -> str:
+        quoted = shlex.quote(remote_path)
+        command = (
+            f"if [ -f {quoted} ]; then printf '%s\\n' {quoted}; "
+            f"else ls -t {quoted}/baseclaw-alpha-*.tar.gz 2>/dev/null | head -n 1; fi"
+        )
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", host, command],
+            text=True,
+            capture_output=True,
+            timeout=45,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "ssh update source lookup failed")
+        archive = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+        if not archive:
+            raise RuntimeError("No baseclaw-alpha archive found on update source.")
+        return archive
+
+    def _safe_extract(self, archive: tarfile.TarFile, target: Path) -> None:
+        target_resolved = str(target.resolve())
+        for member in archive.getmembers():
+            member_path = str((target / member.name).resolve())
+            if os.path.commonpath([target_resolved, member_path]) != target_resolved:
+                raise RuntimeError(f"Unsafe archive path: {member.name}")
+        archive.extractall(target)
+
+    def _overlay_update(self, source_root: Path) -> int:
+        excluded = {
+            ".env.telegram-operator",
+            ".git",
+            ".venv-kokoro",
+            ".venv-telegram-agent",
+            "agent_workspace",
+            "telegram_codex_operator.log",
+            "telegram_operator_messages.sqlite3",
+            "telegram_operator_memory.jsonl",
+            "telegram_operator_state.json",
+        }
+        copied = 0
+        for item in source_root.iterdir():
+            if item.name in excluded:
+                continue
+            destination = PROJECT_ROOT / item.name
+            if item.is_dir():
+                if destination.exists() and not destination.is_dir():
+                    destination.unlink()
+                shutil.copytree(item, destination, dirs_exist_ok=True)
+            else:
+                if destination.exists() and destination.is_dir():
+                    shutil.rmtree(destination)
+                shutil.copy2(item, destination)
+            copied += 1
+        return copied
 
     def on_close(self) -> None:
         self.save(show_message=False)
