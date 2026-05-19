@@ -51,7 +51,6 @@ Optional:
 
 - LM Studio or Ollama for local models
 - Kokoro/Whisper speech setup for voice notes and spoken replies
-- GitHub CLI if you want the UI Update button to pull from a private GitHub repository
 
 ## macOS / Linux Quick Start
 
@@ -61,20 +60,22 @@ After cloning the repository, run:
 ./install.sh
 ```
 
-The script is safe to rerun. It creates or updates the Python virtual environment, checks optional providers, offers to install Codex, Claude, and JCode, checks LM Studio and Ollama, optionally prepares Kokoro voice dependencies, creates `.env.telegram-operator` from the example if needed, and launches the UI.
+The script is safe to rerun. First setup asks about optional components such as Codex, Claude, JCode, Ollama, and Kokoro voice dependencies, then saves those choices locally. Normal reruns use the saved choices and launch without optional setup prompts. Use `./install.sh --setup` to change optional components later, or `./start.sh` for the shortest daily launch command.
 
-The Runtime panel also has an optional Update button. Set Update source to a GitHub repository URL, local folder, direct `.tar.gz` file, or SSH folder containing `baseclaw-*.tar.gz` archives. Private GitHub repositories require GitHub CLI to be installed and authenticated with `gh auth login`. Clicking Update overlays the newest archive onto the current install and then asks you to restart the UI manually.
+The Runtime panel has an Update button that pulls the newest public BaseClaw archive from GitHub and overlays it onto the current install. Restart the UI manually after the update finishes.
 
 Useful options:
 
 ```bash
 ./install.sh --with-kokoro
 ./install.sh --without-kokoro
+./install.sh --setup
+./start.sh
 ./install.sh --no-launch
 ./install.sh --yes
 ```
 
-`--no-launch` skips opening the UI after setup. Start it later with `.venv-telegram-agent/bin/python app/telegram_operator_ui.py`.
+`--no-launch` skips opening the UI after setup. Start it later with `./start.sh`.
 
 `--yes` also accepts optional global CLI installs, so use it only when npm/Homebrew installs are acceptable on that machine.
 

@@ -36,12 +36,11 @@ Use this page when a fresh install opens but one part of BaseClaw does not respo
 - Use another reachable host/IP and the same STT/TTS port when speech runs on a different machine.
 - If speech is unreachable, the UI can start text-only and disable voice replies for that run.
 
-## Private GitHub Update Fails
+## GitHub Update Fails
 
-- Install GitHub CLI.
-- Run `gh auth login`.
-- Use a repository URL in Update source, for example `https://github.com/OWNER/REPO`.
-- A 404 from a private repository usually means GitHub CLI is not authenticated for that account.
+- Confirm the machine can reach GitHub.
+- The UI Update button uses the public BaseClaw GitHub repository directly.
+- If the update still fails, download a fresh archive from GitHub and rerun `./install.sh`.
 
 ## Clean Reinstall
 

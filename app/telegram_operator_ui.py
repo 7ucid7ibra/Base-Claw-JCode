@@ -32,6 +32,7 @@ ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
+UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw-JCode"
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]
@@ -91,7 +92,6 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_BOARD_PATH",
     "TELEGRAM_OPERATOR_BOARD_STATE_PATH",
     "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
-    "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL",
@@ -154,7 +154,6 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_BOARD_PATH": "",
     "TELEGRAM_OPERATOR_BOARD_STATE_PATH": str(BASE_DIR / "telegram_operator_board_state.json"),
     "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES": "",
-    "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE": "",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED": "false",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL": "http://127.0.0.1:1234/v1",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL": "",
@@ -310,7 +309,6 @@ HELP_TEXT = {
     "Language code": "Speech language/accent code sent to Kokoro.",
     "Whisper model": "Whisper model size for voice note transcription. Larger models are slower but can be more accurate.",
     "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
-    "Update source": "Optional source for pulling BaseClaw updates. A GitHub repo URL is recommended; local/SSH archive folders and direct .tar.gz files are also supported.",
 }
 
 ctk.set_appearance_mode("light")
@@ -1075,7 +1073,6 @@ class OperatorUi(ctk.CTk):
         self.update_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
         self.status_detail = ctk.CTkLabel(runtime, text="Status: checking...", text_color=COLORS["muted"], anchor="w")
         self.status_detail.grid(row=1, column=0, sticky="ew")
-        self._entry(runtime, "Update source", "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", row=2)
 
         logs = self._card(settings_body, "Recent Log", "Latest bridge activity and setup errors.", 4, 0)
         logs.grid_rowconfigure(0, weight=1)
@@ -1718,7 +1715,7 @@ class OperatorUi(ctk.CTk):
                 f"Voice: {values.get('TELEGRAM_OPERATOR_KOKORO_VOICE', '')}",
                 f"Whisper: {values.get('TELEGRAM_OPERATOR_WHISPER_MODEL', '')}",
                 f"STT/TTS: {values.get('TELEGRAM_OPERATOR_REMOTE_SPEECH_URL', '') or 'not configured'}",
-                f"Update source: {'configured' if values.get('TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE', '').strip() else 'not configured'}",
+                f"Updates: {UPDATE_SOURCE_URL}",
             ]
         )
         return "\n".join(lines)
@@ -2416,16 +2413,10 @@ class OperatorUi(ctk.CTk):
 
     def update_from_source(self) -> None:
         self.save(show_message=False)
-        source = self.current_values().get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "").strip()
-        if not source:
-            messagebox.showinfo(
-                "Update source needed",
-                "Enter an update source first. Use a GitHub repo URL, Pi SSH folder like user@host:/folder, a local folder, or a direct .tar.gz path.",
-            )
-            return
+        source = UPDATE_SOURCE_URL
         if not messagebox.askyesno(
             "Update BaseClaw",
-            "Pull the newest BaseClaw alpha archive from the update source and overlay it onto this install?\n\nRestart the UI manually after it finishes.",
+            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nRestart the UI manually after it finishes.",
         ):
             return
         if self.update_button:
@@ -2534,9 +2525,16 @@ class OperatorUi(ctk.CTk):
     def _download_github_archive(self, repo: tuple[str, str, str], tmp_path: Path) -> tuple[Path, str]:
         owner, name, branch = repo
         archive_path = tmp_path / f"{name}-{branch}.tar.gz"
+        public_url = f"https://codeload.github.com/{owner}/{name}/tar.gz/{branch}"
+        try:
+            with urlopen(public_url, timeout=120) as response:
+                archive_path.write_bytes(response.read())
+            return archive_path, f"github:{owner}/{name}@{branch}"
+        except Exception:
+            pass
         gh = shutil.which("gh")
         if not gh:
-            raise RuntimeError("GitHub update source requires GitHub CLI. Install gh and run gh auth login first.")
+            raise RuntimeError("GitHub update failed. Confirm the repository is public and this machine can reach github.com.")
         with archive_path.open("wb") as output:
             result = subprocess.run(
                 [gh, "api", f"repos/{owner}/{name}/tarball/{branch}"],
@@ -2546,7 +2544,7 @@ class OperatorUi(ctk.CTk):
             )
         if result.returncode != 0:
             detail = (result.stderr or b"").decode("utf-8", errors="replace").strip() or "GitHub archive download failed"
-            raise RuntimeError(f"GitHub update failed. If the repo is private, run gh auth login first. Detail: {detail}")
+            raise RuntimeError(f"GitHub update failed. Detail: {detail}")
         return archive_path, f"github:{owner}/{name}@{branch}"
 
     def _looks_like_ssh_source(self, source: str) -> bool:

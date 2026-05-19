@@ -4,9 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+CONFIG_PATH=".baseclaw-install.conf"
+PUBLIC_REPO_URL="https://github.com/7ucid7ibra/Base-Claw-JCode"
 YES=0
 LAUNCH=1
 WITH_KOKORO=""
+SETUP_MODE=0
+RUN_MODE=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -14,22 +18,27 @@ for arg in "$@"; do
     --no-launch) LAUNCH=0 ;;
     --with-kokoro) WITH_KOKORO=1 ;;
     --without-kokoro) WITH_KOKORO=0 ;;
+    --setup|--repair) SETUP_MODE=1 ;;
+    --run) RUN_MODE=1 ;;
     -h|--help)
       cat <<'EOF'
 BaseClaw installer and launcher
 
 Usage:
-  ./install.sh [--yes] [--with-kokoro|--without-kokoro] [--no-launch]
+  ./install.sh [--setup] [--yes] [--with-kokoro|--without-kokoro] [--no-launch]
+  ./start.sh
 
 What it does:
   - creates/updates the Python UI/operator virtual environment
-  - optionally installs Codex CLI, Claude CLI, and JCode
+  - optionally installs Codex CLI, Claude CLI, and JCode during setup
   - checks LM Studio and Ollama availability
-  - optionally creates/updates the Kokoro voice server virtual environment
+  - optionally creates/updates the Kokoro voice server virtual environment during setup
   - creates .env.telegram-operator from the example if missing
   - launches the UI unless --no-launch is passed
 
 Notes:
+  Normal reruns reuse saved setup choices and do not ask optional setup questions.
+  Use --setup to rerun optional setup prompts.
   --yes answers yes to optional provider CLI installs. Use it only when global
   npm/Homebrew installs are acceptable on this machine.
 EOF
@@ -38,6 +47,23 @@ EOF
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+FIRST_RUN=0
+if [[ ! -f "$CONFIG_PATH" ]]; then
+  FIRST_RUN=1
+fi
+if [[ "$RUN_MODE" == "1" ]]; then
+  SETUP_MODE=0
+elif [[ "$FIRST_RUN" == "1" ]]; then
+  SETUP_MODE=1
+fi
+if [[ -f "$CONFIG_PATH" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_PATH"
+fi
+if [[ -z "$WITH_KOKORO" && "${BASECLAW_WITH_KOKORO:-}" =~ ^[01]$ ]]; then
+  WITH_KOKORO="$BASECLAW_WITH_KOKORO"
+fi
 
 say() {
   printf '\n%s\n' "$*"
@@ -92,6 +118,10 @@ ensure_node_tool() {
     say "$label found: $(command -v "$binary")"
     return
   fi
+  if [[ "$SETUP_MODE" != "1" ]]; then
+    say "$label not found. Skipping optional install during normal launch. Run ./install.sh --setup to install it."
+    return
+  fi
   if ! have npm; then
     say "$label not found, and npm is not installed. Skipping."
     return
@@ -106,6 +136,10 @@ ensure_node_tool() {
 ensure_jcode() {
   if have jcode; then
     say "JCode found: $(command -v jcode)"
+    return
+  fi
+  if [[ "$SETUP_MODE" != "1" ]]; then
+    say "JCode not found. Skipping optional install during normal launch. Run ./install.sh --setup to install it."
     return
   fi
   if have brew && ask "Install JCode with Homebrew?" "y"; then
@@ -183,6 +217,10 @@ ensure_ollama() {
     say "Ollama found: $(command -v ollama)"
     return
   fi
+  if [[ "$SETUP_MODE" != "1" ]]; then
+    say "Ollama not installed. Skipping optional install during normal launch."
+    return
+  fi
   if have brew && ask "Install Ollama with Homebrew?" "n"; then
     brew install ollama
   else
@@ -244,16 +282,36 @@ setup_kokoro() {
     say "Skipping Kokoro setup."
     return
   fi
+  if [[ -z "$WITH_KOKORO" && "$SETUP_MODE" != "1" ]]; then
+    say "Skipping Kokoro setup during normal launch. Run ./install.sh --setup or ./install.sh --with-kokoro to install it."
+    return
+  fi
   if [[ "$WITH_KOKORO" == "1" ]] || ask "Set up local Kokoro voice server dependencies?" "n"; then
+    WITH_KOKORO=1
     setup_venv ".venv-kokoro" "requirements/kokoro.txt"
     say "Kokoro dependencies are installed. You can start the server with:"
     say "  .venv-kokoro/bin/python app/kokoro_server.py"
   else
+    WITH_KOKORO=0
     say "Skipped Kokoro setup."
   fi
 }
 
+write_install_config() {
+  local kokoro="${WITH_KOKORO:-0}"
+  cat > "$CONFIG_PATH" <<EOF
+# BaseClaw local setup preferences.
+# Re-run ./install.sh --setup to change optional install choices.
+BASECLAW_WITH_KOKORO=$kokoro
+EOF
+}
+
 say "BaseClaw setup"
+if [[ "$SETUP_MODE" == "1" ]]; then
+  say "Setup mode: optional install questions may be shown."
+else
+  say "Launch mode: using saved setup choices. Run ./install.sh --setup to change optional components."
+fi
 
 if [[ ! -f ".env.telegram-operator" && -f ".env.telegram-operator.example" ]]; then
   cp ".env.telegram-operator.example" ".env.telegram-operator"
@@ -274,6 +332,7 @@ ensure_ollama
 
 say "Checking optional voice tooling..."
 setup_kokoro
+write_install_config
 
 say "Setup complete."
 
@@ -282,6 +341,6 @@ if [[ "$LAUNCH" == "1" ]]; then
   exec ".venv-telegram-agent/bin/python" "app/telegram_operator_ui.py"
 else
   say "Launch skipped. Start the UI later with:"
-  say "  .venv-telegram-agent/bin/python app/telegram_operator_ui.py"
-  say "You can also rerun ./install.sh safely when you want setup checks again."
+  say "  ./start.sh"
+  say "You can also rerun ./install.sh --setup when you want setup checks again."
 fi

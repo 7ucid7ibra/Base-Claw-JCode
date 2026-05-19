@@ -49,7 +49,6 @@ Important local defaults:
 - `TELEGRAM_OPERATOR_REMOTE_HOST=127.0.0.1`
 - `TELEGRAM_OPERATOR_SPEECH_PORT=8766`
 - `TELEGRAM_OPERATOR_LLM_PORT=1234`
-- `TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE=` optional GitHub URL, local archive source, or SSH archive source for the UI Update button.
 
 Never publish `.env.telegram-operator`. It contains local credentials and machine-specific settings.
 
