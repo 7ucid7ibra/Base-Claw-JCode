@@ -2417,7 +2417,7 @@ class OperatorUi(ctk.CTk):
         if source.startswith(("http://", "https://")):
             archive_path = tmp_path / Path(urlsplit(source).path).name
             if not archive_path.name.endswith(".tar.gz"):
-                archive_path = tmp_path / "baseclaw-alpha-latest.tar.gz"
+                archive_path = tmp_path / "baseclaw-latest.tar.gz"
             with urlopen(source, timeout=45) as response:
                 archive_path.write_bytes(response.read())
             return archive_path, archive_path.name
@@ -2438,9 +2438,13 @@ class OperatorUi(ctk.CTk):
 
         path = Path(source).expanduser()
         if path.is_dir():
-            matches = sorted(path.glob("baseclaw-alpha-*.tar.gz"), key=lambda item: item.stat().st_mtime, reverse=True)
+            matches = sorted(
+                {item for pattern in ("baseclaw-*.tar.gz", "baseclaw-alpha-*.tar.gz") for item in path.glob(pattern)},
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
             if not matches:
-                raise RuntimeError(f"No baseclaw-alpha archives found in {path}")
+                raise RuntimeError(f"No BaseClaw archives found in {path}")
             return matches[0], matches[0].name
         if path.is_file():
             return path, path.name
@@ -2486,7 +2490,7 @@ class OperatorUi(ctk.CTk):
         quoted = shlex.quote(remote_path)
         command = (
             f"if [ -f {quoted} ]; then printf '%s\\n' {quoted}; "
-            f"else ls -t {quoted}/baseclaw-alpha-*.tar.gz 2>/dev/null | head -n 1; fi"
+            f"else ls -t {quoted}/baseclaw-*.tar.gz {quoted}/baseclaw-alpha-*.tar.gz 2>/dev/null | head -n 1; fi"
         )
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", host, command],
@@ -2498,7 +2502,7 @@ class OperatorUi(ctk.CTk):
             raise RuntimeError((result.stderr or result.stdout).strip() or "ssh update source lookup failed")
         archive = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
         if not archive:
-            raise RuntimeError("No baseclaw-alpha archive found on update source.")
+            raise RuntimeError("No BaseClaw archive found on update source.")
         return archive
 
     def _safe_extract(self, archive: tarfile.TarFile, target: Path) -> None:

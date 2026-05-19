@@ -4814,11 +4814,11 @@ def load_config() -> OperatorConfig:
     history_remote = os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip()
     history_ssh_key_path = resolve_app_path(
         os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""),
-        Path.home() / "Downloads" / "maat_pi_board_ed25519",
+        BASE_DIR / "telegram_operator_board_ed25519",
     )
     history_known_hosts_path = resolve_app_path(
         os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""),
-        Path.home() / "Downloads" / "maat_pi_known_hosts",
+        BASE_DIR / "telegram_operator_board_known_hosts",
     )
     history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
     supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "").strip()

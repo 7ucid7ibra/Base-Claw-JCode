@@ -45,5 +45,7 @@ Do not include:
 - `*.sqlite3`
 - `telegram_operator_state.json`
 - `telegram_operator_memory.jsonl`
+- `telegram_operator_board_ed25519`
+- `telegram_operator_board_known_hosts`
 - local voice/model/cache folders
 - generated screenshots or audio test files

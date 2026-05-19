@@ -6,6 +6,8 @@ telegram_operator_state.json
 telegram_operator_board_state.json
 telegram_operator_memory.jsonl
 telegram_operator_messages.sqlite3
+telegram_operator_board_ed25519
+telegram_operator_board_known_hosts
 *.sqlite3
 *.sqlite3-*
 *.log
