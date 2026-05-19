@@ -45,15 +45,32 @@ if (Test-Path $stageDir) {
 }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
-$excludeDirs = @(".git", ".venv-kokoro", ".venv-telegram-agent", "dist", "__pycache__")
+$excludeDirs = @(
+    ".git",
+    ".venv*",
+    "__pycache__",
+    "agent_workspace",
+    "build",
+    "dist",
+    "tools"
+)
 $excludeFiles = @(
+    ".baseclaw-install.conf",
+    ".env",
+    ".env.*",
     ".env.telegram-operator",
-    "telegram_operator_messages.sqlite3",
-    "telegram_operator_state.json",
-    "telegram_operator_board_state.json",
-    "telegram_codex_operator.log",
+    "*.log",
+    "*.out",
     "*.pyc",
-    "*.pyo"
+    "*.pyo",
+    "*.sqlite3",
+    "*.sqlite3-*",
+    "telegram_operator_*.json",
+    "telegram_operator_*.jsonl",
+    "telegram_operator_messages.sqlite3",
+    "telegram_operator_messages.sqlite3-*",
+    "telegram_operator_state.json",
+    "telegram_operator_board_state.json"
 )
 
 $robocopyArgs = @(
