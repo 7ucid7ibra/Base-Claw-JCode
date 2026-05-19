@@ -230,9 +230,9 @@ THEME_COLORS = {
         "panel_soft": "#F8F0E4",
         "panel_lift": "#FFFFFF",
         "border": "#D8CDBB",
-        "border_soft": "#E7DCCB",
+        "border_soft": "#EFE4D5",
         "text": "#1B1915",
-        "muted": "#776C60",
+        "muted": "#5F574D",
         "accent": "#20333F",
         "accent_hover": "#31485A",
         "accent_text": "#FFF7EC",
@@ -248,10 +248,10 @@ THEME_COLORS = {
         "panel": "#151B19",
         "panel_soft": "#111715",
         "panel_lift": "#1A2421",
-        "border": "#2A3632",
-        "border_soft": "#202B28",
+        "border": "#2F3B36",
+        "border_soft": "#1B2421",
         "text": "#E8E6DC",
-        "muted": "#A3A091",
+        "muted": "#C3BDAE",
         "accent": "#D8A34F",
         "accent_hover": "#F0BA63",
         "accent_text": "#17140F",
@@ -780,6 +780,9 @@ class OperatorUi(ctk.CTk):
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.update_button: ctk.CTkButton | None = None
+        self.start_button: ctk.CTkButton | None = None
+        self.stop_button: ctk.CTkButton | None = None
+        self.restart_button: ctk.CTkButton | None = None
         self.log_box: ctk.CTkTextbox | None = None
         self.chat_scroll: ctk.CTkScrollableFrame | None = None
         self.chat_input: ctk.CTkTextbox | None = None
@@ -796,6 +799,8 @@ class OperatorUi(ctk.CTk):
         self.entry_labels: dict[str, ctk.CTkLabel] = {}
         self.tooltips: list[Tooltip] = []
         self.theme_labels: list[ctk.CTkLabel] = []
+        self.theme_title_labels: list[ctk.CTkLabel] = []
+        self.theme_muted_labels: list[ctk.CTkLabel] = []
         self.theme_entries: list[ctk.CTkBaseClass] = []
         self.theme_cards: list[ctk.CTkFrame] = []
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -877,7 +882,7 @@ class OperatorUi(ctk.CTk):
 
         self._build_chat_card(body)
 
-        self.settings_frame = ctk.CTkScrollableFrame(body, fg_color="transparent", height=380)
+        self.settings_frame = ctk.CTkScrollableFrame(body, fg_color=COLORS["bg"], height=380)
         self.settings_frame.grid_columnconfigure(0, weight=1)
         settings_body = self.settings_frame
 
@@ -1092,10 +1097,20 @@ class OperatorUi(ctk.CTk):
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
-        ctk.CTkButton(buttons, text="Start bridge", height=40, corner_radius=12, command=self.start_operator).grid(
+        self.start_button = ctk.CTkButton(
+            buttons,
+            text="Start bridge",
+            height=40,
+            corner_radius=12,
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["accent_text"],
+            command=self.start_operator,
+        )
+        self.start_button.grid(
             row=0, column=0, sticky="ew", padx=(0, 6)
         )
-        ctk.CTkButton(
+        self.stop_button = ctk.CTkButton(
             buttons,
             text="Stop bridge",
             height=40,
@@ -1103,16 +1118,19 @@ class OperatorUi(ctk.CTk):
             fg_color=COLORS["danger"],
             hover_color=COLORS["danger_hover"],
             command=self.stop_operator,
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-        ctk.CTkButton(
+        )
+        self.stop_button.grid(row=0, column=1, sticky="ew", padx=6)
+        self.restart_button = ctk.CTkButton(
             buttons,
             text="Restart",
             height=40,
             corner_radius=12,
             fg_color=COLORS["panel_lift"],
             hover_color=COLORS["border"],
+            text_color=COLORS["text"],
             command=self.restart_operator,
-        ).grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        )
+        self.restart_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
         self.update_button = ctk.CTkButton(
             buttons,
             text="Update",
@@ -1120,6 +1138,7 @@ class OperatorUi(ctk.CTk):
             corner_radius=12,
             fg_color=COLORS["panel_lift"],
             hover_color=COLORS["border"],
+            text_color=COLORS["text"],
             command=self.update_from_source,
         )
         self.update_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
@@ -1234,12 +1253,26 @@ class OperatorUi(ctk.CTk):
             self.chat_input.configure(fg_color=COLORS["panel_soft"], border_color=COLORS["border"], text_color=COLORS["text"])
         if self.log_box:
             self.log_box.configure(fg_color=COLORS["bg"], border_color=COLORS["border_soft"], text_color=COLORS["text"])
+        if self.settings_frame:
+            self.settings_frame.configure(fg_color=COLORS["bg"], scrollbar_button_color=COLORS["border"], scrollbar_button_hover_color=COLORS["muted"])
+        if self.start_button:
+            self.start_button.configure(fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color=COLORS["accent_text"])
+        if self.stop_button:
+            self.stop_button.configure(fg_color=COLORS["danger"], hover_color=COLORS["danger_hover"], text_color="#FFFFFF")
+        for button in (self.restart_button, self.update_button):
+            if button:
+                button.configure(fg_color=COLORS["panel_lift"], hover_color=COLORS["border"], text_color=COLORS["text"])
         for card in self.theme_cards:
             try:
                 card.configure(fg_color=COLORS["panel_soft"], border_color=COLORS["border_soft"])
             except tk.TclError:
                 pass
-        for label in self.theme_labels:
+        for label in self.theme_title_labels:
+            try:
+                label.configure(text_color=COLORS["text"])
+            except tk.TclError:
+                pass
+        for label in self.theme_muted_labels:
             try:
                 label.configure(text_color=COLORS["muted"])
             except tk.TclError:
@@ -1272,10 +1305,12 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
         )
         self.theme_labels.append(title_label)
+        self.theme_title_labels.append(title_label)
         title_label.grid(row=0, column=0, sticky="w", padx=18, pady=(15, 0))
         self._attach_tooltip(title_label, CARD_HELP_TEXT.get(title, ""))
         subtitle_label = ctk.CTkLabel(card, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), wraplength=560)
         self.theme_labels.append(subtitle_label)
+        self.theme_muted_labels.append(subtitle_label)
         subtitle_label.grid(
             row=1, column=0, sticky="w", padx=18, pady=(2, 12)
         )
@@ -1294,6 +1329,7 @@ class OperatorUi(ctk.CTk):
     ) -> ctk.CTkLabel:
         label = ctk.CTkLabel(parent, text=self._label_text(text), text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w")
         self.theme_labels.append(label)
+        self.theme_muted_labels.append(label)
         label.grid(row=row, column=column, sticky="ew", padx=padx)
         self._attach_tooltip(label, HELP_TEXT.get(text, ""))
         return label
