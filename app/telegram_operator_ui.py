@@ -278,7 +278,7 @@ CARD_HELP_TEXT = {
     "Runtime": "Start, stop, or restart the Telegram bridge process. Settings save automatically and do not require a restart unless the running agent should pick them up.",
     "Connection": "Telegram bot credentials plus the shared host and ports for local services.",
     "Voice": "Controls voice replies, Kokoro voice selection, language, and Whisper transcription model.",
-    "Agent": "Controls which coding harness runs, what model it uses, and what files it may access.",
+    "Agent": "Controls which agent harness runs, which model/provider it uses, and what files it may access.",
     "Recent Log": "Shows the most recent local bridge log lines for quick troubleshooting.",
 }
 HELP_TEXT = {
@@ -289,9 +289,9 @@ HELP_TEXT = {
     "LLM port": "The local model API port. LM Studio usually uses 1234; Ollama usually uses 11434.",
     "Workspace home": "The default working folder for the assistant.",
     "Additional allowed paths": "Extra folders the assistant may access when access scope allows selected paths.",
-    "Mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex or Claude directly.",
-    "Harness": "The coding tool that receives the task and performs file or terminal work.",
-    "Local model provider": "The backend JCode connects to for models, such as LM Studio, Ollama, or hosted API providers.",
+    "Run mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex or Claude directly.",
+    "Agent harness": "The coding tool that receives the task and performs file or terminal work.",
+    "JCode model provider": "The backend JCode connects to for models, such as LM Studio, Ollama, or hosted API providers.",
     "Model": "The model selected for the current harness or provider.",
     "Claude model": "The model name passed to the Claude CLI. Leave blank/default if you want Claude to choose its configured default.",
     "Codex model": "The model name passed to Codex. Use default to rely on the CLI configuration.",
@@ -304,7 +304,7 @@ HELP_TEXT = {
     "Language code": "Speech language/accent code sent to Kokoro.",
     "Whisper model": "Whisper model size for voice note transcription. Larger models are slower but can be more accurate.",
     "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
-    "Update source": "Optional source for pulling BaseClaw updates. Use a GitHub repo URL, SSH artifact folder, local folder, or direct .tar.gz archive.",
+    "Update source": "Optional source for pulling BaseClaw updates. A GitHub repo URL is recommended; local/SSH archive folders and direct .tar.gz files are also supported.",
 }
 
 ctk.set_appearance_mode("dark")
@@ -798,7 +798,7 @@ class OperatorUi(ctk.CTk):
         self.settings_frame.grid_columnconfigure(0, weight=1)
         settings_body = self.settings_frame
 
-        connection = self._card(settings_body, "Connection", "Telegram credentials and allowed chat.", 1, 0)
+        connection = self._card(settings_body, "Connection", "Telegram credentials plus local service host and ports.", 1, 0)
         speech_url = self.values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "") or self.values.get("TELEGRAM_OPERATOR_KOKORO_URL", "")
         llm_url = self.values.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", DEFAULTS["TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL"])
         self.values["TELEGRAM_OPERATOR_REMOTE_HOST"] = self.values.get("TELEGRAM_OPERATOR_REMOTE_HOST", "") or host_from_url(speech_url)
@@ -830,7 +830,7 @@ class OperatorUi(ctk.CTk):
         agent_options = ctk.CTkFrame(agent, fg_color="transparent")
         agent_options.grid(row=4, column=0, sticky="ew")
         agent_options.grid_columnconfigure((0, 1), weight=1, uniform="agent_options")
-        self._label(agent_options, "Mode", row=0, column=0, padx=(0, 6))
+        self._label(agent_options, "Run mode", row=0, column=0, padx=(0, 6))
         ctk.CTkComboBox(
             agent_options,
             variable=self.vars["TELEGRAM_OPERATOR_RUN_MODE"],
@@ -840,7 +840,7 @@ class OperatorUi(ctk.CTk):
             corner_radius=10,
             border_width=1,
         ).grid(row=1, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
-        self._label(agent_options, "Harness", row=0, column=1, padx=(6, 0))
+        self._label(agent_options, "Agent harness", row=0, column=1, padx=(6, 0))
         self.harness_combo = ctk.CTkComboBox(
             agent_options,
             variable=self.vars["TELEGRAM_OPERATOR_PROVIDER"],
@@ -856,7 +856,7 @@ class OperatorUi(ctk.CTk):
         self.vars["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = tk.StringVar(
             value=self.values.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", "").strip()
         )
-        self.local_provider_label = self._label(agent_options, "Local model provider", row=2, column=0, padx=(0, 6))
+        self.local_provider_label = self._label(agent_options, "JCode model provider", row=2, column=0, padx=(0, 6))
         self.local_provider_combo = ctk.CTkComboBox(
             agent_options,
             variable=self.vars["TELEGRAM_OPERATOR_MODEL_PROVIDER"],
@@ -951,7 +951,7 @@ class OperatorUi(ctk.CTk):
         ).grid(row=1, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
         self._switch(agent, "Shared context injection", "TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", row=6)
 
-        voice = self._card(settings_body, "Voice", "Kokoro reply voice and speech language.", 2, 0)
+        voice = self._card(settings_body, "Voice", "Optional STT/TTS setup for voice notes and spoken replies.", 2, 0)
         self.vars["TELEGRAM_OPERATOR_KOKORO_VOICE"] = tk.StringVar(
             value=self.values.get("TELEGRAM_OPERATOR_KOKORO_VOICE", DEFAULTS["TELEGRAM_OPERATOR_KOKORO_VOICE"])
         )
@@ -1004,16 +1004,16 @@ class OperatorUi(ctk.CTk):
         self.whisper_combo.grid(row=1, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
         self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=3)
 
-        runtime = self._card(settings_body, "Runtime", "Start, stop, and keep an eye on the bridge.", 0, 0)
+        runtime = self._card(settings_body, "Runtime", "Start, stop, update, and monitor the bridge.", 0, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
-        ctk.CTkButton(buttons, text="Start", height=40, corner_radius=12, command=self.start_operator).grid(
+        ctk.CTkButton(buttons, text="Start bridge", height=40, corner_radius=12, command=self.start_operator).grid(
             row=0, column=0, sticky="ew", padx=(0, 6)
         )
         ctk.CTkButton(
             buttons,
-            text="Stop",
+            text="Stop bridge",
             height=40,
             corner_radius=12,
             fg_color=COLORS["danger"],
@@ -1043,7 +1043,7 @@ class OperatorUi(ctk.CTk):
         self.status_detail.grid(row=1, column=0, sticky="ew")
         self._entry(runtime, "Update source", "TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", row=2)
 
-        logs = self._card(settings_body, "Recent Log", "Latest bridge activity.", 4, 0)
+        logs = self._card(settings_body, "Recent Log", "Latest bridge activity and setup errors.", 4, 0)
         logs.grid_rowconfigure(0, weight=1)
         self.log_box = ctk.CTkTextbox(
             logs,
@@ -1112,7 +1112,7 @@ class OperatorUi(ctk.CTk):
             self.chat_card.grid_remove()
             self.settings_frame.grid(row=0, column=0, sticky="nsew")
             if self.settings_button:
-                self.settings_button.configure(text="Chat")
+                self.settings_button.configure(text="Back to chat")
             self.refresh_log()
         else:
             self.settings_frame.grid_remove()
@@ -1806,7 +1806,7 @@ class OperatorUi(ctk.CTk):
         ).grid(row=0, column=0)
         ctk.CTkLabel(
             empty,
-            text="Messages from Telegram and this desktop window will appear here.",
+            text="Messages from Telegram and this desktop window will appear here. Open Settings first to add your bot token and choose a harness.",
             text_color=COLORS["muted"],
             font=ctk.CTkFont(size=13),
             wraplength=360,
