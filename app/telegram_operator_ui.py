@@ -1287,6 +1287,8 @@ class OperatorUi(ctk.CTk):
                 entry.configure(fg_color=COLORS["panel"], border_color=COLORS["border"], text_color=COLORS["text"])
             except tk.TclError:
                 pass
+        self._force_theme_redraw()
+        self.after(80, self._force_theme_redraw)
         self.set_status("Theme", f"{ui_theme_display(self.vars['TELEGRAM_OPERATOR_UI_THEME'].get())} mode selected.", None)
 
     def _configure_scrollable_background(self, frame: ctk.CTkScrollableFrame) -> None:
@@ -1303,6 +1305,33 @@ class OperatorUi(ctk.CTk):
                 parent_frame.configure(fg_color=COLORS["bg"], border_color=COLORS["bg"])
             except tk.TclError:
                 pass
+
+    def _force_theme_redraw(self) -> None:
+        if self.chat_scroll:
+            self._configure_scrollable_background(self.chat_scroll)
+        if self.settings_frame:
+            self._configure_scrollable_background(self.settings_frame)
+
+        def redraw(widget: tk.Widget) -> None:
+            draw = getattr(widget, "_draw", None)
+            if callable(draw):
+                try:
+                    draw(no_color_updates=False)
+                except TypeError:
+                    try:
+                        draw()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            for child in widget.winfo_children():
+                redraw(child)
+
+        redraw(self)
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
 
     def _card(
         self,
