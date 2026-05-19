@@ -175,6 +175,14 @@ def normalize_speech_url(url: str) -> str:
     return url
 
 
+def build_host_url(host: str, port: str, suffix: str = "") -> str:
+    host = (host or "127.0.0.1").strip().removeprefix("http://").removeprefix("https://").strip("/")
+    port = (port or "").strip()
+    if not port:
+        return ""
+    return f"http://{host}:{port}{suffix}"
+
+
 def tailscale_speech_urls() -> list[str]:
     executable = shutil.which("tailscale") or shutil.which("tailscale.exe")
     if not executable:
@@ -4852,8 +4860,7 @@ def load_config() -> OperatorConfig:
     jcode_base_url = os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
     if jcode_provider_id in {"lmstudio", "ollama"}:
         remote_host = os.environ.get("TELEGRAM_OPERATOR_REMOTE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-        default_port = "11434" if jcode_provider_id == "ollama" else "1234"
-        llm_port = os.environ.get("TELEGRAM_OPERATOR_LLM_PORT", default_port).strip() or default_port
+        llm_port = "11434" if jcode_provider_id == "ollama" else "1234"
         jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
