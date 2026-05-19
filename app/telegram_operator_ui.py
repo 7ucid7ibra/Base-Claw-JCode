@@ -97,7 +97,6 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL",
     "TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS",
     "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED",
-    "TELEGRAM_OPERATOR_UI_THEME",
 ]
 
 DEFAULTS = {
@@ -161,7 +160,6 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL": "",
     "TELEGRAM_OPERATOR_LOCAL_VISION_TIMEOUT_SECONDS": "180",
     "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED": "true",
-    "TELEGRAM_OPERATOR_UI_THEME": "light",
 }
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
@@ -223,49 +221,25 @@ DEFAULT_LLM_PORTS = {
     "ollama": "11434",
 }
 
-THEME_COLORS = {
-    "light": {
-        "bg": "#EFE7DC",
-        "panel": "#FFFAF1",
-        "panel_soft": "#F8F0E4",
-        "panel_lift": "#FFFFFF",
-        "border": "#D8CDBB",
-        "border_soft": "#EFE4D5",
-        "text": "#1B1915",
-        "muted": "#5F574D",
-        "accent": "#20333F",
-        "accent_hover": "#31485A",
-        "accent_text": "#FFF7EC",
-        "danger": "#9A4B4A",
-        "danger_hover": "#B15A57",
-        "status": "#E5D9C8",
-        "user_bubble": "#20333F",
-        "assistant_bubble": "#FFFAF1",
-        "user_label": "#D7E2DB",
-    },
-    "dark": {
-        "bg": "#0F1312",
-        "panel": "#151B19",
-        "panel_soft": "#111715",
-        "panel_lift": "#1A2421",
-        "border": "#2F3B36",
-        "border_soft": "#1B2421",
-        "text": "#E8E6DC",
-        "muted": "#C3BDAE",
-        "accent": "#D8A34F",
-        "accent_hover": "#F0BA63",
-        "accent_text": "#17140F",
-        "danger": "#8E3B46",
-        "danger_hover": "#A84855",
-        "status": "#293430",
-        "user_bubble": "#D8A34F",
-        "assistant_bubble": "#171D1B",
-        "user_label": "#423018",
-    },
+COLORS = {
+    "bg": "#EFE7DC",
+    "panel": "#FFFAF1",
+    "panel_soft": "#F8F0E4",
+    "panel_lift": "#FFFFFF",
+    "border": "#D8CDBB",
+    "border_soft": "#EFE4D5",
+    "text": "#1B1915",
+    "muted": "#5F574D",
+    "accent": "#20333F",
+    "accent_hover": "#31485A",
+    "accent_text": "#FFF7EC",
+    "danger": "#9A4B4A",
+    "danger_hover": "#B15A57",
+    "status": "#E5D9C8",
+    "user_bubble": "#20333F",
+    "assistant_bubble": "#FFFAF1",
+    "user_label": "#D7E2DB",
 }
-COLORS = THEME_COLORS["light"].copy()
-UI_THEME_LABELS = {"light": "Light", "dark": "Dark"}
-UI_THEME_TO_VALUE = {label: value for value, label in UI_THEME_LABELS.items()}
 WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
 SAFETY_MODE_LABELS = {
     "restricted": "Restricted: approve every task",
@@ -338,26 +312,6 @@ HELP_TEXT = {
     "Voice replies enabled": "When enabled, text replies can also be sent back as generated voice.",
     "Update source": "Optional source for pulling BaseClaw updates. A GitHub repo URL is recommended; local/SSH archive folders and direct .tar.gz files are also supported.",
 }
-
-def ui_theme_value(value: str) -> str:
-    value = value.strip()
-    if value in UI_THEME_TO_VALUE:
-        return UI_THEME_TO_VALUE[value]
-    value = value.lower()
-    return value if value in THEME_COLORS else "light"
-
-
-def ui_theme_display(value: str) -> str:
-    return UI_THEME_LABELS.get(ui_theme_value(value), UI_THEME_LABELS["light"])
-
-
-def apply_ui_theme(value: str) -> str:
-    theme = ui_theme_value(value)
-    COLORS.clear()
-    COLORS.update(THEME_COLORS[theme])
-    ctk.set_appearance_mode("dark" if theme == "dark" else "light")
-    return theme
-
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -760,7 +714,6 @@ class OperatorUi(ctk.CTk):
         self.geometry("690x760+24+24")
         self.minsize(560, 540)
         self.values = read_env(ENV_PATH)
-        apply_ui_theme(self.values.get("TELEGRAM_OPERATOR_UI_THEME", DEFAULTS["TELEGRAM_OPERATOR_UI_THEME"]))
         self.vars: dict[str, tk.StringVar] = {}
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
@@ -788,7 +741,6 @@ class OperatorUi(ctk.CTk):
         self.chat_input: ctk.CTkTextbox | None = None
         self.chat_card: ctk.CTkFrame | None = None
         self.settings_button: ctk.CTkButton | None = None
-        self.theme_toggle: ctk.CTkSegmentedButton | None = None
         self.settings_window: ctk.CTkToplevel | None = None
         self.settings_frame: ctk.CTkScrollableFrame | None = None
         self.settings_visible = False
@@ -798,11 +750,6 @@ class OperatorUi(ctk.CTk):
         self.autosave_after_id: str | None = None
         self.entry_labels: dict[str, ctk.CTkLabel] = {}
         self.tooltips: list[Tooltip] = []
-        self.theme_labels: list[ctk.CTkLabel] = []
-        self.theme_title_labels: list[ctk.CTkLabel] = []
-        self.theme_muted_labels: list[ctk.CTkLabel] = []
-        self.theme_entries: list[ctk.CTkBaseClass] = []
-        self.theme_cards: list[ctk.CTkFrame] = []
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self._wire_autosave()
@@ -846,25 +793,6 @@ class OperatorUi(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
         )
         self.status_pill.grid(row=0, column=1, rowspan=2, sticky="e")
-        self.vars["TELEGRAM_OPERATOR_UI_THEME"] = tk.StringVar(
-            value=ui_theme_display(self.values.get("TELEGRAM_OPERATOR_UI_THEME", DEFAULTS["TELEGRAM_OPERATOR_UI_THEME"]))
-        )
-        self.theme_toggle = ctk.CTkSegmentedButton(
-            header,
-            values=list(UI_THEME_TO_VALUE.keys()),
-            variable=self.vars["TELEGRAM_OPERATOR_UI_THEME"],
-            command=self.on_theme_selected,
-            width=118,
-            height=34,
-            corner_radius=17,
-            fg_color=COLORS["panel_soft"],
-            selected_color=COLORS["accent"],
-            selected_hover_color=COLORS["accent_hover"],
-            unselected_color=COLORS["panel_soft"],
-            unselected_hover_color=COLORS["panel_lift"],
-            text_color=COLORS["text"],
-        )
-        self.theme_toggle.grid(row=0, column=2, rowspan=2, sticky="e", padx=(10, 0))
         self.settings_button = ctk.CTkButton(
             header,
             text="Settings",
@@ -873,7 +801,7 @@ class OperatorUi(ctk.CTk):
             corner_radius=17,
             command=self.open_settings,
         )
-        self.settings_button.grid(row=0, column=3, rowspan=2, sticky="e", padx=(10, 0))
+        self.settings_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(10, 0))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 16))
@@ -1226,71 +1154,6 @@ class OperatorUi(ctk.CTk):
             if self.settings_button:
                 self.settings_button.configure(text="Settings")
 
-    def on_theme_selected(self, value: str | None = None) -> None:
-        selected = ui_theme_display(value or self.vars["TELEGRAM_OPERATOR_UI_THEME"].get())
-        self.vars["TELEGRAM_OPERATOR_UI_THEME"].set(selected)
-        apply_ui_theme(selected)
-        self._apply_runtime_theme()
-        self._schedule_autosave()
-
-    def _apply_runtime_theme(self) -> None:
-        self.configure(fg_color=COLORS["bg"])
-        if self.status_pill:
-            self.status_pill.configure(fg_color=COLORS["status"], text_color=COLORS["text"])
-        if self.theme_toggle:
-            self.theme_toggle.configure(
-                fg_color=COLORS["panel_soft"],
-                selected_color=COLORS["accent"],
-                selected_hover_color=COLORS["accent_hover"],
-                unselected_color=COLORS["panel_soft"],
-                unselected_hover_color=COLORS["panel_lift"],
-                text_color=COLORS["text"],
-            )
-        if self.settings_button:
-            self.settings_button.configure(fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color=COLORS["accent_text"])
-        if self.chat_card:
-            self.chat_card.configure(fg_color=COLORS["panel"], border_color=COLORS["border"])
-        if self.chat_scroll:
-            self.chat_scroll.configure(fg_color=COLORS["bg"], border_color=COLORS["border_soft"])
-            self._configure_scrollable_background(self.chat_scroll)
-        if self.chat_input:
-            self.chat_input.configure(fg_color=COLORS["panel_soft"], border_color=COLORS["border"], text_color=COLORS["text"])
-        if self.log_box:
-            self.log_box.configure(fg_color=COLORS["bg"], border_color=COLORS["border_soft"], text_color=COLORS["text"])
-        if self.settings_frame:
-            self.settings_frame.configure(fg_color=COLORS["bg"], scrollbar_button_color=COLORS["border"], scrollbar_button_hover_color=COLORS["muted"])
-            self._configure_scrollable_background(self.settings_frame)
-        if self.start_button:
-            self.start_button.configure(fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color=COLORS["accent_text"])
-        if self.stop_button:
-            self.stop_button.configure(fg_color=COLORS["danger"], hover_color=COLORS["danger_hover"], text_color="#FFFFFF")
-        for button in (self.restart_button, self.update_button):
-            if button:
-                button.configure(fg_color=COLORS["panel_lift"], hover_color=COLORS["border"], text_color=COLORS["text"])
-        for card in self.theme_cards:
-            try:
-                card.configure(fg_color=COLORS["panel_soft"], border_color=COLORS["border_soft"])
-            except tk.TclError:
-                pass
-        for label in self.theme_title_labels:
-            try:
-                label.configure(text_color=COLORS["text"])
-            except tk.TclError:
-                pass
-        for label in self.theme_muted_labels:
-            try:
-                label.configure(text_color=COLORS["muted"])
-            except tk.TclError:
-                pass
-        for entry in self.theme_entries:
-            try:
-                entry.configure(fg_color=COLORS["panel"], border_color=COLORS["border"], text_color=COLORS["text"])
-            except tk.TclError:
-                pass
-        self._force_theme_redraw()
-        self.after(80, self._force_theme_redraw)
-        self.set_status("Theme", f"{ui_theme_display(self.vars['TELEGRAM_OPERATOR_UI_THEME'].get())} mode selected.", None)
-
     def _configure_scrollable_background(self, frame: ctk.CTkScrollableFrame) -> None:
         for attr in ("_parent_canvas",):
             canvas = getattr(frame, attr, None)
@@ -1306,33 +1169,6 @@ class OperatorUi(ctk.CTk):
             except tk.TclError:
                 pass
 
-    def _force_theme_redraw(self) -> None:
-        if self.chat_scroll:
-            self._configure_scrollable_background(self.chat_scroll)
-        if self.settings_frame:
-            self._configure_scrollable_background(self.settings_frame)
-
-        def redraw(widget: tk.Widget) -> None:
-            draw = getattr(widget, "_draw", None)
-            if callable(draw):
-                try:
-                    draw(no_color_updates=False)
-                except TypeError:
-                    try:
-                        draw()
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-            for child in widget.winfo_children():
-                redraw(child)
-
-        redraw(self)
-        try:
-            self.update_idletasks()
-        except tk.TclError:
-            pass
-
     def _card(
         self,
         parent: ctk.CTkBaseClass,
@@ -1344,7 +1180,6 @@ class OperatorUi(ctk.CTk):
         padx: tuple[int, int] = (0, 0),
     ) -> ctk.CTkFrame:
         card = ctk.CTkFrame(parent, fg_color=COLORS["panel_soft"], border_color=COLORS["border_soft"], border_width=1, corner_radius=18)
-        self.theme_cards.append(card)
         card.grid(row=row, column=column, columnspan=columnspan, sticky="ew", padx=padx, pady=(0, 10))
         card.grid_columnconfigure(0, weight=1)
         title_label = ctk.CTkLabel(
@@ -1353,13 +1188,9 @@ class OperatorUi(ctk.CTk):
             font=ctk.CTkFont(size=16, weight="bold"),
             text_color=COLORS["text"],
         )
-        self.theme_labels.append(title_label)
-        self.theme_title_labels.append(title_label)
         title_label.grid(row=0, column=0, sticky="w", padx=18, pady=(15, 0))
         self._attach_tooltip(title_label, CARD_HELP_TEXT.get(title, ""))
         subtitle_label = ctk.CTkLabel(card, text=subtitle, text_color=COLORS["muted"], font=ctk.CTkFont(size=12), wraplength=560)
-        self.theme_labels.append(subtitle_label)
-        self.theme_muted_labels.append(subtitle_label)
         subtitle_label.grid(
             row=1, column=0, sticky="w", padx=18, pady=(2, 12)
         )
@@ -1377,8 +1208,6 @@ class OperatorUi(ctk.CTk):
         padx: tuple[int, int] = (0, 0),
     ) -> ctk.CTkLabel:
         label = ctk.CTkLabel(parent, text=self._label_text(text), text_color=COLORS["muted"], font=ctk.CTkFont(size=12), anchor="w")
-        self.theme_labels.append(label)
-        self.theme_muted_labels.append(label)
         label.grid(row=row, column=column, sticky="ew", padx=padx)
         self._attach_tooltip(label, HELP_TEXT.get(text, ""))
         return label
@@ -1424,7 +1253,6 @@ class OperatorUi(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
         )
-        self.theme_entries.append(entry)
         entry.grid(row=row + 1, column=column, sticky="ew", pady=(3, 12), padx=padx)
         return entry
 
@@ -1444,7 +1272,6 @@ class OperatorUi(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
         )
-        self.theme_entries.append(path_entry)
         path_entry.grid(
             row=0, column=0, sticky="ew"
         )
@@ -1538,7 +1365,6 @@ class OperatorUi(ctk.CTk):
             border_color=COLORS["border"],
             text_color=COLORS["text"],
         )
-        self.theme_entries.append(path_entry)
         path_entry.grid(
             row=0, column=0, sticky="ew"
         )
@@ -1714,9 +1540,6 @@ class OperatorUi(ctk.CTk):
         values = read_env(ENV_PATH)
         for key, var in self.vars.items():
             values[key] = var.get().strip()
-        values["TELEGRAM_OPERATOR_UI_THEME"] = ui_theme_value(
-            values.get("TELEGRAM_OPERATOR_UI_THEME", DEFAULTS["TELEGRAM_OPERATOR_UI_THEME"])
-        )
         values["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = language_code(
             values.get("TELEGRAM_OPERATOR_KOKORO_LANG_CODE", "")
         )
