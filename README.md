@@ -97,6 +97,41 @@ For the easiest all-in-one local setup:
 .\install.ps1 -Mode full
 ```
 
+For a guided first setup with questions about Kokoro/Whisper speech and optional provider CLIs:
+
+```powershell
+.\install.ps1
+```
+
+For a double-click Windows installer window, open:
+
+```text
+install-wizard.cmd
+```
+
+The wizard lets you choose client/full/speech-host mode, JCode, Codex, Claude, and whether to launch the UI after installation.
+
+To build a normal Windows setup executable, install Inno Setup and run:
+
+```powershell
+.\scripts\build_windows_installer.ps1
+```
+
+The build script stages a clean copy, excludes local secrets, virtual environments, logs, and SQLite state, then writes `dist\BaseClawSetup.exe`.
+
+Provider tools are optional install choices:
+
+```powershell
+.\install.ps1 -Mode client -InstallJCode
+.\install.ps1 -Mode client -InstallCodex
+.\install.ps1 -Mode client -InstallClaude
+.\install.ps1 -Mode client -InstallProviderTools
+```
+
+`-InstallJCode` downloads the matching Windows JCode release into `tools\jcode\jcode.exe`. The Windows start script adds that folder to `PATH` automatically, so a project-local JCode install is enough for the UI and operator.
+
+The Windows installer and start script set `JCODE_NO_TELEMETRY=1` by default for private-machine use.
+
 For a speech host only:
 
 ```powershell
