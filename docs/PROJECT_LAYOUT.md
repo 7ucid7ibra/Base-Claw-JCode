@@ -22,6 +22,7 @@ docs/
   INSTALLATION_MODES.md
   KOKORO_REMOTE_USAGE.md
   TELEGRAM_CODEX_OPERATOR.md
+  TROUBLESHOOTING.md
   PUBLISHING.md
 agent_workspace/
 custom_voices/

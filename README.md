@@ -2,6 +2,13 @@
 
 BaseClaw is a minimal local-agent foundation for private-machine workflows. It gives you a Telegram interface, desktop chat, speech in and out, safety controls, and a small local settings UI without trying to become a full agent platform.
 
+Use it as a clean base for:
+
+- learning how local coding agents are wired together
+- running a private Telegram-controlled assistant on your own machine
+- switching between local models through JCode and cloud CLIs such as Codex or Claude
+- building custom skills, automations, and workflows on top of a stable foundation
+
 It also contains a local Kokoro-82M HTTP TTS server for fast preset-voice speech generation. The server uses `hexgrad/Kokoro-82M`, serves WAV audio at 24000 Hz, and includes a helper for converting generated speech into a Telegram voice note.
 
 Kokoro is intentionally isolated in its own Python 3.11 environment at `.venv-kokoro`; do not mix this setup into a Tortoise environment.
@@ -23,9 +30,28 @@ BaseClaw is licensed under the Apache License 2.0. The project is intended to st
 - `app/`: Python entry points for Kokoro, Telegram, and the UI.
 - `scripts/`: Windows installer and service-start helper scripts.
 - `requirements/`: split Python dependency files for Kokoro and the Telegram operator.
-- `docs/`: usage, operator, publishing, and layout notes.
+- `docs/`: usage, operator, troubleshooting, publishing, and layout notes.
 - `agent_workspace/`: the default assistant home.
 - `custom_voices/`, `german_kokoro/`, `kokoro_german/`: optional local voice/model asset folders.
+
+## What You Need
+
+Required:
+
+- Python 3.11 or newer
+- A Telegram bot token and your allowed chat id
+
+Choose at least one agent path:
+
+- JCode for local mode, usually with LM Studio or Ollama
+- Codex CLI, authenticated with `codex login`
+- Claude CLI, authenticated through Claude Code
+
+Optional:
+
+- LM Studio or Ollama for local models
+- Kokoro/Whisper speech setup for voice notes and spoken replies
+- GitHub CLI if you want the UI Update button to pull from a private GitHub repository
 
 ## macOS / Linux Quick Start
 
@@ -86,7 +112,7 @@ If `espeak-ng` cannot be installed globally from a non-admin shell, you can plac
 $env:Path = "$PWD\tools\espeak-ng\eSpeak NG;$env:Path"
 ```
 
-See `docs/INSTALLATION_MODES.md` for the full breakdown.
+See `docs/INSTALLATION_MODES.md` for the full breakdown and `docs/TROUBLESHOOTING.md` if setup opens but one service does not respond.
 
 ## Start Kokoro
 
@@ -240,11 +266,7 @@ Requests run through the selected harness. The Telegram typing or recording indi
 
 Voice selection uses Kokoro language codes: `a` is American English, `b` is British English, and `d` is the optional local German Kokoro pipeline. The UI auto-updates the code for common voice prefixes like `af_`, `am_`, `bf_`, `bm_`, and `dm_`.
 
-For speech hosting, `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the only visible host setting. Leave it blank for local speech. If it is set, both Kokoro and Whisper try that host first and fall back to local `http://127.0.0.1:8766` if it is unreachable.
-
-The remote speech host field accepts a bare IP or hostname. The app adds `http://` and port `8766` automatically when they are omitted.
-
-Set the host field to `127.0.0.1` for local speech, or to another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
+For speech hosting, set `Host IP / name` and `STT/TTS port` in the UI. Use `127.0.0.1` for local speech, or another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. If no speech host is reachable, BaseClaw can still start text-only and voice features stay unavailable until speech is configured. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
 When JCode is used with LM Studio or Ollama, BaseClaw creates or updates a JCode provider profile from the selected Host IP/name, LLM port, and model before running the agent. Session resume state is stored per harness, so switching between Claude, Codex, and JCode does not reuse stale session ids.
 
