@@ -881,9 +881,12 @@ class OperatorUi(ctk.CTk):
         body.grid_rowconfigure(0, weight=1)
 
         self._build_chat_card(body)
+        if self.chat_scroll:
+            self._configure_scrollable_background(self.chat_scroll)
 
         self.settings_frame = ctk.CTkScrollableFrame(body, fg_color=COLORS["bg"], height=380)
         self.settings_frame.grid_columnconfigure(0, weight=1)
+        self._configure_scrollable_background(self.settings_frame)
         settings_body = self.settings_frame
 
         connection = self._card(settings_body, "Connection", "Telegram credentials plus local service host and ports.", 1, 0)
@@ -1249,12 +1252,14 @@ class OperatorUi(ctk.CTk):
             self.chat_card.configure(fg_color=COLORS["panel"], border_color=COLORS["border"])
         if self.chat_scroll:
             self.chat_scroll.configure(fg_color=COLORS["bg"], border_color=COLORS["border_soft"])
+            self._configure_scrollable_background(self.chat_scroll)
         if self.chat_input:
             self.chat_input.configure(fg_color=COLORS["panel_soft"], border_color=COLORS["border"], text_color=COLORS["text"])
         if self.log_box:
             self.log_box.configure(fg_color=COLORS["bg"], border_color=COLORS["border_soft"], text_color=COLORS["text"])
         if self.settings_frame:
             self.settings_frame.configure(fg_color=COLORS["bg"], scrollbar_button_color=COLORS["border"], scrollbar_button_hover_color=COLORS["muted"])
+            self._configure_scrollable_background(self.settings_frame)
         if self.start_button:
             self.start_button.configure(fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"], text_color=COLORS["accent_text"])
         if self.stop_button:
@@ -1283,6 +1288,21 @@ class OperatorUi(ctk.CTk):
             except tk.TclError:
                 pass
         self.set_status("Theme", f"{ui_theme_display(self.vars['TELEGRAM_OPERATOR_UI_THEME'].get())} mode selected.", None)
+
+    def _configure_scrollable_background(self, frame: ctk.CTkScrollableFrame) -> None:
+        for attr in ("_parent_canvas",):
+            canvas = getattr(frame, attr, None)
+            if canvas is not None:
+                try:
+                    canvas.configure(bg=COLORS["bg"], highlightthickness=0)
+                except tk.TclError:
+                    pass
+        parent_frame = getattr(frame, "_parent_frame", None)
+        if parent_frame is not None:
+            try:
+                parent_frame.configure(fg_color=COLORS["bg"], border_color=COLORS["bg"])
+            except tk.TclError:
+                pass
 
     def _card(
         self,
