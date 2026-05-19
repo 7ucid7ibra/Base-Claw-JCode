@@ -114,7 +114,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_SPEECH_PORT": "8766",
     "TELEGRAM_OPERATOR_LLM_PORT": "1234",
     "TELEGRAM_OPERATOR_REMOTE_SPEECH_URL": "",
-    "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK": "false",
+    "TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK": "true",
     "TELEGRAM_OPERATOR_STARTUP_NOTICE": "true",
     "TELEGRAM_OPERATOR_KOKORO_URL": "http://127.0.0.1:8766",
     "TELEGRAM_OPERATOR_KOKORO_URLS": "",
@@ -218,6 +218,10 @@ MODEL_PROVIDER_ORDER = [
 ]
 MODEL_PROVIDER_OPTIONS = [MODEL_PROVIDER_LABELS[key] for key in MODEL_PROVIDER_ORDER]
 MODEL_PROVIDER_TO_VALUE = {label: key for key, label in MODEL_PROVIDER_LABELS.items()}
+DEFAULT_LLM_PORTS = {
+    "lmstudio": "1234",
+    "ollama": "11434",
+}
 
 THEME_COLORS = {
     "light": {
@@ -313,7 +317,8 @@ HELP_TEXT = {
     "Chat id(s)": "Allowed Telegram chat IDs. Use commas for multiple chats.",
     "Host IP / name": "The machine hosting local services. Use 127.0.0.1 for this machine or an IP/hostname for another reachable machine.",
     "STT/TTS port": "The speech service port. The same endpoint handles Whisper speech-to-text and Kokoro text-to-speech.",
-    "LLM port": "The local model API port. LM Studio usually uses 1234; Ollama usually uses 11434.",
+    "LLM port": "The local model API port. BaseClaw sets this automatically when LM Studio or Ollama is selected.",
+    "LLM port (auto)": "The local model API port. LM Studio uses 1234 and Ollama uses 11434 by default.",
     "Workspace home": "The default working folder for the assistant.",
     "Additional allowed paths": "Extra folders the assistant may access when access scope allows selected paths.",
     "Run mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex or Claude directly.",
@@ -663,6 +668,10 @@ def model_provider_value(value: str) -> str:
     return value if value in MODEL_PROVIDER_LABELS else "lmstudio"
 
 
+def default_llm_port(model_provider: str) -> str:
+    return DEFAULT_LLM_PORTS.get(model_provider_value(model_provider), "1234")
+
+
 def operator_processes() -> list[dict]:
     processes = []
     for process in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline"]):
@@ -758,6 +767,8 @@ class OperatorUi(ctk.CTk):
         self.harness_combo: ctk.CTkComboBox | None = None
         self.local_provider_label: ctk.CTkLabel | None = None
         self.local_provider_combo: ctk.CTkComboBox | None = None
+        self.llm_port_entry: ctk.CTkEntry | None = None
+        self.llm_port_label: ctk.CTkLabel | None = None
         self.model_label: ctk.CTkLabel | None = None
         self.model_picker: ctk.CTkFrame | None = None
         self.model_combo: ctk.CTkComboBox | None = None
@@ -883,7 +894,8 @@ class OperatorUi(ctk.CTk):
         host_row.grid_columnconfigure((0, 1, 2), weight=1, uniform="host")
         self._entry(host_row, "Host IP / name", "TELEGRAM_OPERATOR_REMOTE_HOST", row=0, column=0, padx=(0, 6))
         self._entry(host_row, "STT/TTS port", "TELEGRAM_OPERATOR_SPEECH_PORT", row=0, column=1, padx=6)
-        self._entry(host_row, "LLM port", "TELEGRAM_OPERATOR_LLM_PORT", row=0, column=2, padx=(6, 0))
+        self.llm_port_entry = self._entry(host_row, "LLM port", "TELEGRAM_OPERATOR_LLM_PORT", row=0, column=2, padx=(6, 0))
+        self.llm_port_label = self.entry_labels.get("TELEGRAM_OPERATOR_LLM_PORT")
 
         agent = self._card(settings_body, "Agent", "Harness, model provider, workspace, and safety controls.", 3, 0)
         provider = self.values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
@@ -1408,11 +1420,8 @@ class OperatorUi(ctk.CTk):
             profile_var.set("")
         port_var = self.vars.get("TELEGRAM_OPERATOR_LLM_PORT")
         if port_var:
-            current_port = port_var.get().strip()
-            if model_provider == "ollama" and current_port in {"", "1234"}:
-                port_var.set("11434")
-            elif model_provider == "lmstudio" and current_port in {"", "11434"}:
-                port_var.set("1234")
+            if model_provider in DEFAULT_LLM_PORTS:
+                port_var.set(default_llm_port(model_provider))
         model_var = self.vars.get("TELEGRAM_OPERATOR_CODEX_MODEL")
         if self.model_combo and model_var:
             self.model_combo.configure(values=self._model_options(self.vars["TELEGRAM_OPERATOR_PROVIDER"].get(), model_var.get()))
@@ -1520,6 +1529,14 @@ class OperatorUi(ctk.CTk):
                 self.api_key_label.grid_remove()
                 self.api_key_entry.grid_remove()
 
+        if self.llm_port_label and self.llm_port_entry:
+            if local_mode and model_provider in DEFAULT_LLM_PORTS:
+                self._configure_label_text(self.llm_port_label, "LLM port (auto)")
+                self.llm_port_entry.configure(state="disabled")
+            else:
+                self._configure_label_text(self.llm_port_label, "LLM port")
+                self.llm_port_entry.configure(state="normal")
+
         if self.timeout_label and self.timeout_entry:
             if local_mode:
                 self.timeout_label.grid(row=4, column=1, sticky="ew", padx=(6, 0))
@@ -1620,6 +1637,8 @@ class OperatorUi(ctk.CTk):
         )
         values["TELEGRAM_OPERATOR_RUN_MODE"] = run_mode_value(values.get("TELEGRAM_OPERATOR_RUN_MODE", ""))
         values["TELEGRAM_OPERATOR_MODEL_PROVIDER"] = model_provider_value(values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", ""))
+        if values["TELEGRAM_OPERATOR_MODEL_PROVIDER"] in DEFAULT_LLM_PORTS:
+            values["TELEGRAM_OPERATOR_LLM_PORT"] = default_llm_port(values["TELEGRAM_OPERATOR_MODEL_PROVIDER"])
         if values["TELEGRAM_OPERATOR_RUN_MODE"] == "local":
             values["TELEGRAM_OPERATOR_PROVIDER"] = "jcode"
             values["TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE"] = ""
@@ -1663,6 +1682,7 @@ class OperatorUi(ctk.CTk):
         values["TELEGRAM_OPERATOR_KOKORO_URL"] = remote_speech_url or DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]
         values["TELEGRAM_OPERATOR_KOKORO_URLS"] = ""
         values["TELEGRAM_OPERATOR_WHISPER_URLS"] = ""
+        values["TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK"] = "true"
         values["TELEGRAM_OPERATOR_PROVIDER"] = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower() or "jcode"
         if values["TELEGRAM_OPERATOR_PROVIDER"] not in PROVIDERS:
             values["TELEGRAM_OPERATOR_PROVIDER"] = "jcode"
@@ -1674,21 +1694,9 @@ class OperatorUi(ctk.CTk):
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
         voice_enabled = parse_bool(values.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True)
         remote = values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "").strip()
-        local_fallback = is_local_speech_url(remote) or parse_bool(
-            values.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""),
-            False,
-        )
+        local_fallback = True
         if remote:
             if speech_health(remote):
-                return True
-            if not local_fallback:
-                if voice_enabled:
-                    self._disable_voice_for_text_only_start(
-                        values,
-                        f"Remote STT/TTS host is unreachable: {remote}. Starting text-only with voice replies disabled.",
-                    )
-                else:
-                    self.set_status("Text-only", f"Remote STT/TTS host is unreachable: {remote}.", None)
                 return True
         if local_fallback:
             for url in local_speech_urls():

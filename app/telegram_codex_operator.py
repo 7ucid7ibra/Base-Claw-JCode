@@ -4800,7 +4800,7 @@ def load_config() -> OperatorConfig:
         legacy_url = os.environ.get("TELEGRAM_OPERATOR_KOKORO_URL", "").strip()
         if legacy_url and not is_local_speech_url(legacy_url):
             remote_speech_url = legacy_url
-    local_speech_fallback = parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), False)
+    local_speech_fallback = parse_bool(os.environ.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""), True)
     speech_urls = build_speech_urls(remote_speech_url, local_speech_fallback)
     safety_mode = os.environ.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip().lower()
     if safety_mode not in {"restricted", "safe", "code", "full"}:
@@ -4850,9 +4850,10 @@ def load_config() -> OperatorConfig:
     )
     jcode_provider_id = os.environ.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
     jcode_base_url = os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
-    if jcode_provider_id == "ollama":
+    if jcode_provider_id in {"lmstudio", "ollama"}:
         remote_host = os.environ.get("TELEGRAM_OPERATOR_REMOTE_HOST", "127.0.0.1").strip() or "127.0.0.1"
-        llm_port = os.environ.get("TELEGRAM_OPERATOR_LLM_PORT", "11434").strip() or "11434"
+        default_port = "11434" if jcode_provider_id == "ollama" else "1234"
+        llm_port = os.environ.get("TELEGRAM_OPERATOR_LLM_PORT", default_port).strip() or default_port
         jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
