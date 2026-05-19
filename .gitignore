@@ -21,6 +21,8 @@ venv/
 .python-version
 
 # Generated media and caches
+dist/
+build/
 *.wav
 *.mp3
 *.ogg

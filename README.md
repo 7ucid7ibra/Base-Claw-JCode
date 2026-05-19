@@ -62,6 +62,14 @@ After cloning the repository, run:
 
 The script is safe to rerun. First setup asks about optional components such as Codex, Claude, JCode, Ollama, and Kokoro voice dependencies, then saves those choices locally. Normal reruns use the saved choices and launch without optional setup prompts. Use `./install.sh --setup` to change optional components later, or `./start.sh` for the shortest daily launch command.
 
+On macOS you can also double-click `install-macos.command` for first setup or `start-macos.command` for daily startup. To generate a simple local `BaseClaw.app` wrapper, run:
+
+```bash
+./scripts/build_macos_app.sh
+```
+
+The generated app is placed under `dist/` and is intentionally not committed. It is a convenience wrapper around `./start.sh`, not a signed DMG package.
+
 The Runtime panel has an Update button that pulls the newest public BaseClaw archive from GitHub and overlays it onto the current install. Restart the UI manually after the update finishes.
 
 Useful options:
