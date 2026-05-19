@@ -28,6 +28,10 @@ What it does:
   - optionally creates/updates the Kokoro voice server virtual environment
   - creates .env.telegram-operator from the example if missing
   - launches the UI unless --no-launch is passed
+
+Notes:
+  --yes answers yes to optional provider CLI installs. Use it only when global
+  npm/Homebrew installs are acceptable on this machine.
 EOF
       exit 0
       ;;
@@ -197,6 +201,11 @@ setup_venv() {
   fi
   if [[ "$venv" == ".venv-telegram-agent" ]]; then
     ensure_tkinter "$py"
+    py="$(python_bin)"
+    if [[ -z "$py" ]] || ! python_has_tkinter "$py"; then
+      say "Tkinter is still unavailable. Install a Python build with Tkinter support, then rerun ./install.sh."
+      exit 1
+    fi
   fi
   if [[ ! -d "$venv" ]]; then
     "$py" -m venv "$venv"
@@ -227,8 +236,7 @@ ensure_tkinter() {
   if python_has_tkinter "$py"; then
     return
   fi
-  say "Tkinter is still unavailable. Install a Python build with Tkinter support, then rerun ./install.sh."
-  exit 1
+  say "Tkinter is still unavailable for this Python. Rechecking installed Python versions..."
 }
 
 setup_kokoro() {
@@ -273,5 +281,7 @@ if [[ "$LAUNCH" == "1" ]]; then
   say "Launching BaseClaw UI..."
   exec ".venv-telegram-agent/bin/python" "app/telegram_operator_ui.py"
 else
-  say "Launch skipped. Start later with: ./install.sh"
+  say "Launch skipped. Start the UI later with:"
+  say "  .venv-telegram-agent/bin/python app/telegram_operator_ui.py"
+  say "You can also rerun ./install.sh safely when you want setup checks again."
 fi

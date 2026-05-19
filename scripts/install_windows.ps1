@@ -43,9 +43,17 @@ if ($installHost) {
 }
 
 if ($installClient) {
-    Ensure-Command codex "Install Codex CLI and run: codex login"
+    Ensure-Command jcode "Install JCode if you want the default local/JCode mode."
+    Ensure-Command codex "Install Codex CLI and run: codex login if you want Codex mode."
+    Ensure-Command claude "Install Claude CLI and authenticate if you want Claude mode."
+    if (Get-Command jcode -ErrorAction SilentlyContinue) {
+        Write-Host "JCode CLI found. This is the default local harness."
+    }
     if (Get-Command codex -ErrorAction SilentlyContinue) {
-        Write-Host "Codex CLI found. If this is a fresh machine, run 'codex login' before starting the Telegram operator."
+        Write-Host "Codex CLI found. If this is a fresh machine, run 'codex login' before using Codex mode."
+    }
+    if (Get-Command claude -ErrorAction SilentlyContinue) {
+        Write-Host "Claude CLI found. Make sure it is authenticated before using Claude mode."
     }
 }
 

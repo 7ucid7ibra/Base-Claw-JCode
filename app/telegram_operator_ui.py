@@ -371,6 +371,47 @@ def codex_preflight() -> tuple[bool, str]:
     return True, f"Codex CLI: {version}"
 
 
+def jcode_preflight() -> tuple[bool, str]:
+    executable = shutil.which("jcode")
+    if not executable:
+        return False, "JCode is selected, but the jcode CLI is not on PATH. Install JCode or choose Codex/Claude first."
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as exc:
+        return False, f"JCode check failed: {exc}"
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        return False, detail or "JCode CLI did not respond successfully."
+    version = (result.stdout or result.stderr).strip() or "installed"
+    return True, f"JCode CLI: {version}"
+
+
+def claude_preflight() -> tuple[bool, str]:
+    executable = shutil.which("claude")
+    if not executable:
+        return False, "Claude provider is selected, but the claude CLI is not on PATH. Install/login to Claude CLI first, then start again."
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return True, f"Claude CLI found: {executable}"
+    if result.returncode != 0:
+        return True, f"Claude CLI found: {executable}"
+    version = (result.stdout or result.stderr).strip() or "installed"
+    return True, f"Claude CLI: {version}"
+
+
 def normalize_speech_url(url: str) -> str:
     url = url.strip().rstrip("/")
     if url and "://" not in url:
@@ -1481,6 +1522,7 @@ class OperatorUi(ctk.CTk):
         return values
 
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
+        voice_enabled = parse_bool(values.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True)
         remote = values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "").strip()
         local_fallback = is_local_speech_url(remote) or parse_bool(
             values.get("TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK", ""),
@@ -1490,9 +1532,14 @@ class OperatorUi(ctk.CTk):
             if speech_health(remote):
                 return True
             if not local_fallback:
-                self.set_status("Speech offline", f"Remote speech host is unreachable: {remote}", False)
-                messagebox.showerror("Speech host unreachable", f"Remote speech host is unreachable:\n{remote}")
-                return False
+                if voice_enabled:
+                    self._disable_voice_for_text_only_start(
+                        values,
+                        f"Remote STT/TTS host is unreachable: {remote}. Starting text-only with voice replies disabled.",
+                    )
+                else:
+                    self.set_status("Text-only", f"Remote STT/TTS host is unreachable: {remote}.", None)
+                return True
         if local_fallback:
             for url in local_speech_urls():
                 if speech_health(url):
@@ -1501,18 +1548,29 @@ class OperatorUi(ctk.CTk):
                     return True
             ok, detail = start_local_speech_host()
             if not ok:
-                self.set_status("Speech offline", detail, False)
-                messagebox.showerror("Speech host needed", detail)
-                return False
+                if voice_enabled:
+                    self._disable_voice_for_text_only_start(values, f"{detail} Starting text-only with voice replies disabled.")
+                else:
+                    self.set_status("Text-only", detail, None)
+                return True
             self.set_status("Speech ready", detail, None)
             self.refresh_voices()
             return True
-        self.set_status("Speech needed", "No remote speech host is configured and local fallback is disabled.", False)
-        messagebox.showerror(
-            "Speech host needed",
-            "No remote speech host is configured and local fallback is disabled.",
-        )
-        return False
+        detail = "No STT/TTS host is configured. Starting text-only."
+        if voice_enabled:
+            self._disable_voice_for_text_only_start(values, f"{detail} Voice replies are disabled until speech is configured.")
+        else:
+            self.set_status("Text-only", detail, None)
+        return True
+
+    def _disable_voice_for_text_only_start(self, values: dict[str, str], detail: str) -> None:
+        values["TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED"] = "false"
+        if "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED" in self.vars:
+            self.vars["TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED"].set("false")
+        write_env(ENV_PATH, values)
+        self.values = values
+        self.set_status("Text-only", detail, None)
+        messagebox.showwarning("Starting text-only", detail)
 
     def set_status(self, label: str, detail: str, running: bool | None = None) -> None:
         if self.status_pill:
@@ -2215,17 +2273,26 @@ class OperatorUi(ctk.CTk):
         self.save(show_message=False)
         values = self.current_values()
         Path(values["TELEGRAM_OPERATOR_WORKDIR"]).mkdir(parents=True, exist_ok=True)
-        if values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower() == "codex":
+        provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower()
+        if provider == "jcode":
+            jcode_ok, jcode_detail = jcode_preflight()
+            if not jcode_ok:
+                self.set_status("Setup needed", jcode_detail, False)
+                messagebox.showerror("JCode setup needed", jcode_detail)
+                return
+        if provider == "codex":
             codex_ok, codex_detail = codex_preflight()
             if not codex_ok:
                 self.set_status("Setup needed", codex_detail, False)
                 messagebox.showerror("Codex setup needed", codex_detail)
                 return
-        if values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower() == "claude" and not shutil.which("claude"):
-            detail = "Claude provider is selected, but the claude CLI is not on PATH. Install/login to Claude CLI first, then start again."
-            self.set_status("Setup needed", detail, False)
-            messagebox.showerror("Claude setup needed", detail)
-            return
+        if provider == "claude":
+            claude_ok, claude_detail = claude_preflight()
+            if not claude_ok:
+                self.set_status("Setup needed", claude_detail, False)
+                messagebox.showerror("Claude setup needed", claude_detail)
+                return
+            self.set_status("Claude ready", claude_detail, None)
         if not self.ensure_speech_ready(values):
             return
         existing = root_operator_processes()

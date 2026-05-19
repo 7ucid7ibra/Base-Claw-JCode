@@ -135,6 +135,29 @@ def check_codex_command() -> None:
         warn(str(exc))
 
 
+def check_cli_command(name: str, install_hint: str) -> None:
+    executable = shutil.which(name)
+    if not executable:
+        warn(f"{name} was not found on PATH. {install_hint}")
+        return
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            cwd=BASE_DIR,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        ok(f"{name} found at {executable}")
+        return
+    if result.returncode == 0:
+        version = (result.stdout or result.stderr).strip() or executable
+        ok(f"{name} found: {version}")
+    else:
+        warn(f"{name} was found at {executable}, but did not return a version")
+
+
 def check_kokoro_health() -> None:
     try:
         with urlopen("http://127.0.0.1:8766/health", timeout=3) as response:
@@ -159,6 +182,8 @@ def main() -> None:
     if args.mode in {"full", "client"}:
         check_imports("Telegram env", venv_python(".venv-telegram-agent"), TELEGRAM_IMPORTS)
         check_codex_command()
+        check_cli_command("jcode", "Install JCode or select Codex/Claude in the UI.")
+        check_cli_command("claude", "Install Claude CLI if you want Claude mode.")
 
 
 if __name__ == "__main__":

@@ -48,7 +48,11 @@ Useful options:
 ./install.sh --yes
 ```
 
-Codex and Claude still require their normal login steps after installation. LM Studio must be started manually with a loaded model if you want local JCode models.
+`--no-launch` skips opening the UI after setup. Start it later with `.venv-telegram-agent/bin/python app/telegram_operator_ui.py`.
+
+`--yes` also accepts optional global CLI installs, so use it only when npm/Homebrew installs are acceptable on that machine.
+
+Codex and Claude still require their normal login steps after installation. JCode must be installed for the default local mode. LM Studio must be started manually with a loaded model if you want local JCode models.
 
 ## Windows Setup
 
