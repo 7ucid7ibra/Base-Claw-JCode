@@ -31,7 +31,7 @@ Usage:
 What it does:
   - creates/updates the Python UI/operator virtual environment
   - creates a macOS Applications launcher when running on macOS
-  - optionally installs Codex CLI, Claude CLI, and JCode during setup
+  - optionally installs Codex CLI, Claude CLI, Gemini CLI, and JCode during setup
   - checks LM Studio and Ollama availability
   - optionally creates/updates the Kokoro voice server virtual environment during setup
   - creates .env.telegram-operator from the example if missing
@@ -334,6 +334,7 @@ setup_venv ".venv-telegram-agent" "requirements/telegram-operator.txt"
 say "Checking optional coding providers..."
 ensure_node_tool "codex" "@openai/codex" "Codex CLI"
 ensure_node_tool "claude" "@anthropic-ai/claude-code" "Claude CLI"
+ensure_node_tool "gemini" "@google/gemini-cli" "Gemini CLI"
 ensure_jcode
 
 say "Checking local model tooling..."

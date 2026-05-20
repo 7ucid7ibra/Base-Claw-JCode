@@ -163,9 +163,10 @@ DEFAULTS = {
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
 CLAUDE_MODELS = ["", "sonnet", "opus", "claude-sonnet-4-6", "claude-opus-4-6"]
+GEMINI_MODELS = ["", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
 JCODE_MODELS = ["qwen3-coder-30b", "qwen/qwen3-coder-30b"]
-PROVIDERS = ["jcode", "codex", "claude"]
-CLOUD_HARNESSES = ["codex", "claude"]
+PROVIDERS = ["jcode", "codex", "claude", "gemini"]
+CLOUD_HARNESSES = ["codex", "claude", "gemini"]
 LOCAL_HARNESSES = ["jcode"]
 RUN_MODE_LABELS = {
     "local": "Local mode",
@@ -294,12 +295,13 @@ HELP_TEXT = {
     "LLM port (auto)": "The local model API port. LM Studio uses 1234 and Ollama uses 11434 by default.",
     "Workspace home": "The default working folder for the assistant.",
     "Additional allowed paths": "Extra folders the assistant may access when access scope allows selected paths.",
-    "Run mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex or Claude directly.",
+    "Run mode": "Local mode uses JCode with a model provider. Cloud provider mode uses Codex, Claude, or Gemini directly.",
     "Agent harness": "The coding tool that receives the task and performs file or terminal work.",
     "JCode model provider": "The backend JCode connects to for models, such as LM Studio, Ollama, or hosted API providers.",
     "Model": "The model selected for the current harness or provider.",
     "Claude model": "The model name passed to the Claude CLI. Leave blank/default if you want Claude to choose its configured default.",
     "Codex model": "The model name passed to Codex. Use default to rely on the CLI configuration.",
+    "Gemini model": "The model name passed to Gemini CLI. Leave blank if you want Gemini to use its configured default.",
     "API key for selected provider": "Only needed for hosted JCode providers that require an API key. Local LM Studio and Ollama do not use this.",
     "Agent timeout seconds": "Maximum time the agent process may run for one request before BaseClaw stops waiting.",
     "Access scope": "Controls which folders the assistant may read or write.",
@@ -414,6 +416,26 @@ def claude_preflight() -> tuple[bool, str]:
         return True, f"Claude CLI found: {executable}"
     version = (result.stdout or result.stderr).strip() or "installed"
     return True, f"Claude CLI: {version}"
+
+
+def gemini_preflight() -> tuple[bool, str]:
+    executable = shutil.which("gemini")
+    if not executable:
+        return False, "Gemini provider is selected, but the gemini CLI is not on PATH. Install the official @google/gemini-cli package and authenticate first."
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return True, f"Gemini CLI found: {executable}"
+    if result.returncode != 0:
+        return True, f"Gemini CLI found: {executable}"
+    version = (result.stdout or result.stderr).strip() or "installed"
+    return True, f"Gemini CLI: {version}"
 
 
 def normalize_speech_url(url: str) -> str:
@@ -1382,7 +1404,7 @@ class OperatorUi(ctk.CTk):
             model_var.set("qwen3-coder-30b")
         elif provider == "codex" and model in {"qwen3-coder-30b", "qwen/qwen3-coder-30b"}:
             model_var.set("default")
-        elif provider == "claude" and model in {"qwen3-coder-30b", "qwen/qwen3-coder-30b"}:
+        elif provider in {"claude", "gemini"} and model in {"qwen3-coder-30b", "qwen/qwen3-coder-30b"}:
             model_var.set("")
         if self.model_combo:
             self.model_combo.configure(values=self._model_options(provider, model_var.get().strip()))
@@ -1411,7 +1433,8 @@ class OperatorUi(ctk.CTk):
                 self.model_label.grid(row=2, column=1, sticky="ew", padx=(6, 0))
                 self.model_picker.grid(row=3, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
             else:
-                self._configure_label_text(self.model_label, "Claude model" if provider == "claude" else "Codex model")
+                model_label = "Claude model" if provider == "claude" else "Gemini model" if provider == "gemini" else "Codex model"
+                self._configure_label_text(self.model_label, model_label)
                 self.model_label.grid(row=2, column=0, sticky="ew", padx=(0, 6))
                 self.model_picker.grid(row=3, column=0, sticky="ew", pady=(3, 12), padx=(0, 6))
 
@@ -1461,6 +1484,8 @@ class OperatorUi(ctk.CTk):
             options = self._local_model_options()
         elif provider == "claude":
             options = CLAUDE_MODELS
+        elif provider == "gemini":
+            options = GEMINI_MODELS
         else:
             options = ["", *JCODE_MODELS, *CODEX_MODELS]
         return options if model in options else [model, *options]
@@ -1697,7 +1722,7 @@ class OperatorUi(ctk.CTk):
         run_mode = run_mode_display(values.get("TELEGRAM_OPERATOR_RUN_MODE", "local"))
         model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
         if not model:
-            model = "Claude CLI default" if provider == "claude" else "Codex CLI default" if provider == "codex" else "JCode default"
+            model = "Claude CLI default" if provider == "claude" else "Gemini CLI default" if provider == "gemini" else "Codex CLI default" if provider == "codex" else "JCode default"
         lines = [
             "BaseClaw UI opened.",
             f"Mode: {run_mode}",
@@ -2158,6 +2183,17 @@ class OperatorUi(ctk.CTk):
             if session_id:
                 cmd.append("--continue")
             return cmd, prompt
+        if provider == "gemini":
+            cmd = [self._require_executable("gemini"), "--prompt", "", "--skip-trust", "--output-format", "text"]
+            model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
+            if model and model != "default":
+                cmd.extend(["--model", model])
+            action_mode = values.get("TELEGRAM_OPERATOR_ACTION_MODE", "full").strip().lower()
+            approval_mode = "plan" if action_mode == "read" else "default" if action_mode == "approve" else "yolo"
+            cmd.extend(["--approval-mode", approval_mode])
+            if session_id:
+                cmd.extend(["--resume", "latest"])
+            return cmd, prompt
         if provider == "codex":
             codex = resolve_codex_command()
             workdir = Path(values.get("TELEGRAM_OPERATOR_WORKDIR") or DEFAULT_WORKSPACE).resolve()
@@ -2186,7 +2222,7 @@ class OperatorUi(ctk.CTk):
                 cmd.extend(["--model", model])
             cmd.append("-")
             return cmd, prompt
-        raise RuntimeError(f"Desktop chat currently supports jcode, codex, and claude, not {provider}.")
+        raise RuntimeError(f"Desktop chat currently supports jcode, codex, claude, and gemini, not {provider}.")
 
     def _ensure_jcode_api_key(self, values: dict[str, str]) -> None:
         api_key = values.get("TELEGRAM_OPERATOR_JCODE_API_KEY", "").strip()
@@ -2312,6 +2348,9 @@ class OperatorUi(ctk.CTk):
         if provider == "claude":
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip() or "Claude CLI default"
             return f"Backend details: Claude CLI provider, model `{model}`."
+        if provider == "gemini":
+            model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip() or "Gemini CLI default"
+            return f"Backend details: Gemini CLI provider, model `{model}`."
         if provider == "codex":
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "") or "default"
             return f"Backend details: Codex CLI provider, model `{model}`."
@@ -2356,6 +2395,13 @@ class OperatorUi(ctk.CTk):
                 messagebox.showerror("Claude setup needed", claude_detail)
                 return
             self.set_status("Claude ready", claude_detail, None)
+        if provider == "gemini":
+            gemini_ok, gemini_detail = gemini_preflight()
+            if not gemini_ok:
+                self.set_status("Setup needed", gemini_detail, False)
+                messagebox.showerror("Gemini setup needed", gemini_detail)
+                return
+            self.set_status("Gemini ready", gemini_detail, None)
         if not self.ensure_speech_ready(values):
             return
         existing = root_operator_processes()

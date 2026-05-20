@@ -38,7 +38,7 @@ function New-Checkbox {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "BaseClaw Windows Installer"
-$form.Size = New-Object System.Drawing.Size(540, 500)
+$form.Size = New-Object System.Drawing.Size(540, 530)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedDialog"
 $form.MaximizeBox = $false
@@ -57,25 +57,26 @@ $form.Controls.Add((New-Label "Optional agent provider tools:" 24 196))
 $installJCode = New-Checkbox "Install JCode locally for the default local model mode" 42 226 $true
 $installCodex = New-Checkbox "Install Codex CLI with npm" 42 256
 $installClaude = New-Checkbox "Install Claude CLI with npm" 42 286
-$form.Controls.AddRange(@($installJCode, $installCodex, $installClaude))
+$installGemini = New-Checkbox "Install Gemini CLI with npm" 42 316
+$form.Controls.AddRange(@($installJCode, $installCodex, $installClaude, $installGemini))
 
-$launchUi = New-Checkbox "Launch the BaseClaw UI after installation" 42 330 $true
+$launchUi = New-Checkbox "Launch the BaseClaw UI after installation" 42 350 $true
 $form.Controls.Add($launchUi)
 
-$status = New-Label "Ready." 24 370 470 44
+$status = New-Label "Ready." 24 385 470 44
 $status.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
 $status.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
 $form.Controls.Add($status)
 
 $installButton = New-Object System.Windows.Forms.Button
 $installButton.Text = "Install"
-$installButton.Location = New-Object System.Drawing.Point(290, 425)
+$installButton.Location = New-Object System.Drawing.Point(290, 450)
 $installButton.Size = New-Object System.Drawing.Size(100, 32)
 $form.Controls.Add($installButton)
 
 $startButton = New-Object System.Windows.Forms.Button
 $startButton.Text = "Start UI"
-$startButton.Location = New-Object System.Drawing.Point(400, 425)
+$startButton.Location = New-Object System.Drawing.Point(400, 450)
 $startButton.Size = New-Object System.Drawing.Size(100, 32)
 $form.Controls.Add($startButton)
 
@@ -96,6 +97,9 @@ $installButton.Add_Click({
     }
     if ($installClaude.Checked) {
         $args += "-InstallClaude"
+    }
+    if ($installGemini.Checked) {
+        $args += "-InstallGemini"
     }
     if (-not $launchUi.Checked) {
         $args += "-NoLaunch"

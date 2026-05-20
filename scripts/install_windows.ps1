@@ -7,6 +7,7 @@ param(
     [switch]$InstallJCode,
     [switch]$InstallCodex,
     [switch]$InstallClaude,
+    [switch]$InstallGemini,
     [switch]$Setup,
     [switch]$Yes,
     [string]$JCodeVersion = "0.12.3"
@@ -195,6 +196,11 @@ if ($interactiveSetup) {
             $InstallClaude = $true
         }
     }
+    if (-not (Get-Command gemini -ErrorAction SilentlyContinue) -and -not $InstallGemini -and -not $InstallProviderTools) {
+        if (Ask-YesNo "Install Gemini CLI?" $false) {
+            $InstallGemini = $true
+        }
+    }
 }
 
 $installHost = $Mode -in @("full", "host")
@@ -208,6 +214,9 @@ if ($InstallProviderTools -or $InstallCodex) {
 }
 if ($InstallProviderTools -or $InstallClaude) {
     Install-NpmGlobal -Package "@anthropic-ai/claude-code" -CommandName "claude"
+}
+if ($InstallProviderTools -or $InstallGemini) {
+    Install-NpmGlobal -Package "@google/gemini-cli" -CommandName "gemini"
 }
 
 if ($installHost) {
@@ -223,9 +232,10 @@ if ($installHost) {
 
 if ($installClient) {
     Write-Step "Checking agent provider tools"
-    Ensure-Command jcode "Run .\install.ps1 -Mode client -InstallJCode, or choose Codex/Claude in the UI."
+    Ensure-Command jcode "Run .\install.ps1 -Mode client -InstallJCode, or choose Codex/Claude/Gemini in the UI."
     Ensure-Command codex "Run .\install.ps1 -Mode client -InstallCodex and then codex login if you want Codex mode."
     Ensure-Command claude "Run .\install.ps1 -Mode client -InstallClaude and then authenticate if you want Claude mode."
+    Ensure-Command gemini "Run .\install.ps1 -Mode client -InstallGemini and then authenticate if you want Gemini mode."
 }
 
 if ($installHost) {
@@ -272,7 +282,7 @@ Write-Step "Next steps"
 if ($installClient) {
     Write-Host "1. Edit .env.telegram-operator or use the UI to set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS."
     Write-Host "2. Start the UI later with: .\start-ui.ps1"
-    Write-Host "3. Optional provider installs: -InstallJCode, -InstallCodex, -InstallClaude, or -InstallProviderTools."
+    Write-Host "3. Optional provider installs: -InstallJCode, -InstallCodex, -InstallClaude, -InstallGemini, or -InstallProviderTools."
 }
 if ($installHost) {
     Write-Host "Speech host can be started with: .\start-kokoro.ps1"

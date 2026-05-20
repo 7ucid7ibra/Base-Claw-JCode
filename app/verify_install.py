@@ -182,8 +182,9 @@ def main() -> None:
     if args.mode in {"full", "client"}:
         check_imports("Telegram env", venv_python(".venv-telegram-agent"), TELEGRAM_IMPORTS)
         check_codex_command()
-        check_cli_command("jcode", "Install JCode or select Codex/Claude in the UI.")
+        check_cli_command("jcode", "Install JCode or select Codex/Claude/Gemini in the UI.")
         check_cli_command("claude", "Install Claude CLI if you want Claude mode.")
+        check_cli_command("gemini", "Install the official @google/gemini-cli package if you want Gemini mode.")
 
 
 if __name__ == "__main__":

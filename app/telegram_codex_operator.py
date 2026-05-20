@@ -411,7 +411,12 @@ class OperatorConfig:
 
 def startup_summary(config: OperatorConfig, *, source: str) -> str:
     provider = config.agent_provider.strip().lower() or "unknown"
-    model = config.codex_model.strip() or ("Claude CLI default" if provider == "claude" else "Codex CLI default" if provider == "codex" else "JCode default")
+    model = config.codex_model.strip() or (
+        "Claude CLI default" if provider == "claude"
+        else "Gemini CLI default" if provider == "gemini"
+        else "Codex CLI default" if provider == "codex"
+        else "JCode default"
+    )
     lines = [
         f"BaseClaw {source} online.",
         f"Harness: {provider}",
@@ -1454,6 +1459,7 @@ class LocalCliBridge:
         jcode_provider_id: str = "",
         jcode_api_key: str = "",
         jcode_base_url: str = "",
+        action_mode: str = "full",
     ):
         self.provider = provider
         self.workdir = workdir
@@ -1463,6 +1469,7 @@ class LocalCliBridge:
         self.jcode_provider_id = jcode_provider_id.strip()
         self.jcode_api_key = jcode_api_key.strip()
         self.jcode_base_url = jcode_base_url.strip().rstrip("/")
+        self.action_mode = action_mode.strip().lower()
 
     def _command(self, prompt: str, session_id: Optional[str]) -> tuple[list[str], Optional[str]]:
         if self.provider == "claude":
@@ -1473,7 +1480,11 @@ class LocalCliBridge:
                 cmd.append("--continue")
             return cmd, prompt
         if self.provider == "gemini":
-            cmd = ["gemini", "-p", "", "--yolo", "--skip-trust", "--output-format", "text"]
+            cmd = ["gemini", "--prompt", "", "--skip-trust", "--output-format", "text"]
+            if self.model and self.model != "default":
+                cmd.extend(["--model", self.model])
+            approval_mode = "plan" if self.action_mode == "read" else "default" if self.action_mode == "approve" else "yolo"
+            cmd.extend(["--approval-mode", approval_mode])
             if session_id:
                 cmd.extend(["--resume", "latest"])
             return cmd, prompt
@@ -1620,7 +1631,7 @@ def build_agent_bridge(config: OperatorConfig):
             config.allowed_paths,
             config.action_mode,
         )
-    if provider in {"claude", "jcode"} and not config.agent_command.strip():
+    if provider in {"claude", "gemini", "jcode"} and not config.agent_command.strip():
         return LocalCliBridge(
             provider,
             config.workdir,
@@ -1630,6 +1641,7 @@ def build_agent_bridge(config: OperatorConfig):
             config.jcode_provider_id,
             config.jcode_api_key,
             config.jcode_base_url,
+            config.action_mode,
         )
     return GenericCliBridge(provider, config.workdir, config.agent_command, config.agent_timeout_seconds)
 
@@ -3136,6 +3148,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if provider == "claude":
             model = self.config.codex_model or "Claude CLI default"
             return f"Backend details: this instance is using the Claude CLI with model `{model}`."
+        if provider == "gemini":
+            model = self.config.codex_model or "Gemini CLI default"
+            return f"Backend details: this instance is using the Gemini CLI with model `{model}`."
         return f"Backend details: this instance is using provider `{self.config.agent_provider}`."
 
     async def _process_user_message(

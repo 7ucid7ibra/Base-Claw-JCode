@@ -6,7 +6,7 @@ Use it as a clean base for:
 
 - learning how local coding agents are wired together
 - running a private Telegram-controlled assistant on your own machine
-- switching between local models through JCode and cloud CLIs such as Codex or Claude
+- switching between local models through JCode and cloud CLIs such as Codex, Claude, or Gemini
 - building custom skills, automations, and workflows on top of a stable foundation
 
 It also contains a local Kokoro-82M HTTP TTS server for fast preset-voice speech generation. The server uses `hexgrad/Kokoro-82M`, serves WAV audio at 24000 Hz, and includes a helper for converting generated speech into a Telegram voice note.
@@ -17,7 +17,7 @@ German Kokoro support is available as an optional local add-on when compatible c
 
 ## Project Status
 
-This is an alpha foundation for tinkering, learning, and private-machine workflows. It is intentionally lightweight: Telegram and the desktop UI are the interfaces, Kokoro and Whisper provide speech, JCode can connect to local models, and Codex or Claude can be used directly when preferred.
+This is an alpha foundation for tinkering, learning, and private-machine workflows. It is intentionally lightweight: Telegram and the desktop UI are the interfaces, Kokoro and Whisper provide speech, JCode can connect to local models, and Codex, Claude, or Gemini can be used directly when preferred.
 
 Before publishing or sharing it, read `docs/PUBLISHING.md`. In particular, do not publish a real `.env.telegram-operator`, logs, SQLite databases, generated audio, virtual environments, or downloaded model folders.
 
@@ -46,6 +46,7 @@ Choose at least one agent path:
 - JCode for local mode, usually with LM Studio or Ollama
 - Codex CLI, authenticated with `codex login`
 - Claude CLI, authenticated through Claude Code
+- Gemini CLI, authenticated through the official `@google/gemini-cli`
 
 Optional:
 
@@ -60,7 +61,7 @@ After cloning the repository, run:
 ./install.sh
 ```
 
-The script is safe to rerun. First setup asks about optional components such as Codex, Claude, JCode, Ollama, and Kokoro voice dependencies, then saves those choices locally. Normal reruns use the saved choices and launch without optional setup prompts. Use `./install.sh --setup` to change optional components later, or `./start.sh` for the shortest daily launch command.
+The script is safe to rerun. First setup asks about optional components such as Codex, Claude, Gemini, JCode, Ollama, and Kokoro voice dependencies, then saves those choices locally. Normal reruns use the saved choices and launch without optional setup prompts. Use `./install.sh --setup` to change optional components later, or `./start.sh` for the shortest daily launch command.
 
 On macOS, `install.sh` also creates a user-level launcher at `~/Applications/BaseClaw.app`. After the first setup, you can start BaseClaw by double-clicking that app instead of opening Terminal in the project folder.
 
@@ -97,7 +98,7 @@ Useful options:
 
 `--yes` also accepts optional global CLI installs, so use it only when npm/Homebrew installs are acceptable on that machine.
 
-Codex and Claude still require their normal login steps after installation. JCode must be installed for the default local mode. LM Studio must be started manually with a loaded model if you want local JCode models.
+Codex, Claude, and Gemini still require their normal login steps after installation. JCode must be installed for the default local mode. LM Studio must be started manually with a loaded model if you want local JCode models.
 
 ## Windows Setup
 
@@ -119,7 +120,7 @@ For a double-click Windows installer window, open:
 install-wizard.cmd
 ```
 
-The wizard lets you choose client/full/speech-host mode, JCode, Codex, Claude, and whether to launch the UI after installation.
+The wizard lets you choose client/full/speech-host mode, JCode, Codex, Claude, Gemini, and whether to launch the UI after installation.
 
 To build a normal Windows setup executable, install Inno Setup and run:
 
@@ -135,6 +136,7 @@ Provider tools are optional install choices:
 .\install.ps1 -Mode client -InstallJCode
 .\install.ps1 -Mode client -InstallCodex
 .\install.ps1 -Mode client -InstallClaude
+.\install.ps1 -Mode client -InstallGemini
 .\install.ps1 -Mode client -InstallProviderTools
 ```
 
@@ -260,7 +262,7 @@ BaseClaw includes a Telegram-controlled coding-agent operator bridge:
 - Desktop chat in the local UI
 - Whisper transcription for incoming voice
 - JCode local-model operation with LM Studio, Ollama, or hosted JCode providers
-- Direct Codex CLI and Claude CLI operation
+- Direct Codex CLI, Claude CLI, and Gemini CLI operation
 - Persistent session resume where the selected harness supports it
 - Compact live status updates during long foreground tasks
 - Kokoro voice replies with selectable voice
@@ -322,7 +324,7 @@ Voice selection uses Kokoro language codes: `a` is American English, `b` is Brit
 
 For speech hosting, set `Host IP / name` and `STT/TTS port` in the UI. Use `127.0.0.1` for local speech, or another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. BaseClaw also tries local speech candidates automatically, so a stale remote host does not prevent a working local Kokoro server from being used. If no speech host is reachable, BaseClaw can still start text-only and voice features stay unavailable until speech is configured. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
-When JCode is used with LM Studio or Ollama, BaseClaw creates or updates a JCode provider profile from the selected Host IP/name, the automatically selected local model port, and model before running the agent. LM Studio uses port `1234` and Ollama uses port `11434` by default. Session resume state is stored per harness, so switching between Claude, Codex, and JCode does not reuse stale session ids.
+When JCode is used with LM Studio or Ollama, BaseClaw creates or updates a JCode provider profile from the selected Host IP/name, the automatically selected local model port, and model before running the agent. LM Studio uses port `1234` and Ollama uses port `11434` by default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse stale session ids.
 
 If no workspace home is selected, the UI uses `agent_workspace` inside the project folder as the assistant's default home.
 
@@ -335,6 +337,7 @@ Read `docs/TELEGRAM_CODEX_OPERATOR.md` before using it. This bridge is intention
 - JCode local mode expects `jcode` on `PATH`. For LM Studio, start the LM Studio local server and load a model first.
 - Codex mode expects `codex` on `PATH` and authenticated with `codex login`.
 - Claude mode expects `claude` on `PATH` and authenticated through the Claude CLI.
+- Gemini mode expects `gemini` on `PATH` from the official `@google/gemini-cli` package and authenticated before use.
 
 ## Verification
 
