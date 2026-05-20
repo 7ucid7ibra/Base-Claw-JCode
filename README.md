@@ -68,7 +68,15 @@ On macOS you can also double-click `install-macos.command` for first setup or `s
 ./scripts/build_macos_app.sh
 ```
 
-The generated app is placed under `dist/` and is intentionally not committed. It is a convenience wrapper around `./start.sh`, not a signed DMG package.
+The generated app is placed under `dist/` and is intentionally not committed. It is a convenience wrapper around `./start.sh`.
+
+To build an alpha macOS DMG from a clean staged copy, run:
+
+```bash
+./scripts/build_macos_dmg.sh
+```
+
+The DMG is written under `dist/`. It is not signed or notarized yet, so macOS may require Control-click, then Open.
 
 The Runtime panel has an Update button that pulls the newest public BaseClaw archive from GitHub and overlays it onto the current install. Restart the UI manually after the update finishes.
 
