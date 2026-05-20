@@ -2598,8 +2598,6 @@ class OperatorUi(ctk.CTk):
                     add_dirs = self._allowed_write_dirs(values, execution_dir)
                     for path in add_dirs[1:]:
                         cmd.extend(["--add-dir", str(path)])
-            if action_mode != "approve":
-                cmd.extend(["--ask-for-approval", "never"])
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
             if model and model != "default":
                 cmd.extend(["--model", model])
