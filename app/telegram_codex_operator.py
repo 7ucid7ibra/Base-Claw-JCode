@@ -37,9 +37,18 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
 DEFAULT_WORKSPACE = PROJECT_ROOT / "agent_workspace"
-OPERATOR_ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
+def _operator_env_path_from_args() -> Path:
+    if "--profile-env" in sys.argv:
+        index = sys.argv.index("--profile-env")
+        if index + 1 < len(sys.argv):
+            return Path(sys.argv[index + 1]).expanduser()
+    return Path(os.environ.get("BASECLAW_OPERATOR_ENV_PATH") or PROJECT_ROOT / ".env.telegram-operator").expanduser()
+
+
+OPERATOR_ENV_PATH = _operator_env_path_from_args()
 load_dotenv(OPERATOR_ENV_PATH, override=True)
-LOG_PATH = BASE_DIR / "telegram_codex_operator.log"
+LOG_PATH = Path(os.environ.get("TELEGRAM_OPERATOR_LOG_PATH") or BASE_DIR / "telegram_codex_operator.log").expanduser()
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -138,6 +147,21 @@ def parse_csv_list(raw: str) -> list[str]:
     return values
 
 
+def parse_path_list(raw: str) -> list[Path]:
+    values = []
+    seen = set()
+    for part in re.split(r"[;\n]", raw or ""):
+        value = part.strip()
+        if not value:
+            continue
+        path = resolve_app_path(value, BASE_DIR)
+        key = str(path)
+        if key not in seen:
+            values.append(path)
+            seen.add(key)
+    return values
+
+
 def is_local_speech_url(url: str) -> bool:
     normalized = normalize_speech_url(url).lower()
     return normalized in {
@@ -158,6 +182,14 @@ def normalize_speech_url(url: str) -> str:
         if parts.netloc and not has_port:
             url = urlunsplit((parts.scheme or "http", f"{parts.netloc}:8766", parts.path, "", ""))
     return url
+
+
+def build_host_url(host: str, port: str, suffix: str = "") -> str:
+    host = (host or "127.0.0.1").strip().removeprefix("http://").removeprefix("https://").strip("/")
+    port = (port or "").strip()
+    if not port:
+        return ""
+    return f"http://{host}:{port}{suffix}"
 
 
 def tailscale_speech_urls() -> list[str]:
@@ -201,9 +233,9 @@ def build_speech_urls(remote_url: str, local_fallback: bool = True) -> list[str]
     urls = []
     remote_url = normalize_speech_url(remote_url)
     local_url = "http://127.0.0.1:8766"
-    if remote_url and not is_local_speech_url(remote_url):
+    if remote_url:
         urls.append(remote_url)
-    if local_fallback:
+    if local_fallback and not is_local_speech_url(remote_url):
         urls.append(local_url)
         urls.extend(tailscale_speech_urls())
     return unique_urls(urls)
@@ -331,6 +363,9 @@ class OperatorConfig:
     bot_token: str
     allowed_chat_ids: set[int]
     workdir: Path
+    access_scope: str
+    allowed_paths: list[Path]
+    action_mode: str
     state_path: Path
     memory_log_path: Path
     sqlite_path: Path
@@ -345,6 +380,12 @@ class OperatorConfig:
     agent_command: str
     agent_timeout_seconds: int
     codex_model: str
+    jcode_provider_id: str
+    jcode_api_key: str
+    jcode_provider_profile: str
+    jcode_base_url: str
+    shared_context_enabled: bool
+    shared_context_limit: int
     safety_mode: str
     safe_mode: bool
     supervisor_id: str
@@ -377,6 +418,50 @@ class OperatorConfig:
     voice_replies_enabled: bool
 
 
+def startup_summary(config: OperatorConfig, *, source: str) -> str:
+    provider = config.agent_provider.strip().lower() or "unknown"
+    model = config.codex_model.strip() or (
+        "Claude CLI default" if provider == "claude"
+        else "Gemini CLI default" if provider == "gemini"
+        else "Codex CLI default" if provider == "codex"
+        else "JCode default"
+    )
+    lines = [
+        f"BaseClaw {source} online.",
+        f"Harness: {provider}",
+        f"Model: {model}",
+    ]
+    if provider == "jcode":
+        lines.append(f"Model provider: {config.jcode_provider_id or 'auto'}")
+        lines.append(f"Model base URL: {config.jcode_base_url or 'provider default'}")
+    lines.extend(
+        [
+            f"Workspace: {config.workdir}",
+            f"Access: {config.access_scope}",
+            f"Actions: {config.action_mode}",
+            f"Shared context: {'on' if config.shared_context_enabled else 'off'}",
+            f"Voice replies: {'on' if config.voice_replies_enabled else 'off'}",
+            f"Voice: {config.kokoro_voice}",
+            f"Whisper: {config.whisper_model_name}",
+            f"STT/TTS hosts: {', '.join(config.kokoro_urls) if config.kokoro_urls else 'none'}",
+            f"Timeout: {config.agent_timeout_seconds}s",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def friendly_voice_error(exc: Exception) -> str:
+    detail = str(exc)
+    lower = detail.lower()
+    if "timed out" in lower or "connecttimeout" in lower:
+        return "STT/TTS host timed out. Check the Host IP and STT/TTS port, or turn voice replies off for this test."
+    if "connection refused" in lower or "failed to establish" in lower:
+        return "STT/TTS host is not accepting connections. Start the speech server, fix the host/port, or turn voice replies off."
+    if "all kokoro hosts failed" in lower:
+        return "All STT/TTS hosts failed. Check the speech server settings or turn voice replies off."
+    return detail[:500]
+
+
 @dataclass
 class PendingApproval:
     chat_id: int
@@ -405,24 +490,42 @@ class StateStore:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._data = {"sessions": {}}
+        self._data = {"sessions": {}, "provider_sessions": {}}
         if self.path.exists():
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
-            self._data = {"sessions": loaded.get("sessions", {})}
+            self._data = {
+                "sessions": loaded.get("sessions", {}),
+                "provider_sessions": loaded.get("provider_sessions", {}),
+            }
         self._data.setdefault("sessions", {})
+        self._data.setdefault("provider_sessions", {})
 
     def save(self) -> None:
         self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
 
-    def get_session_id(self, chat_id: int) -> Optional[str]:
+    def get_session_id(self, chat_id: int, provider: str = "") -> Optional[str]:
+        provider = provider.strip().lower()
+        if provider:
+            return self._data.get("provider_sessions", {}).get(str(chat_id), {}).get(provider)
         return self._data.get("sessions", {}).get(str(chat_id))
 
-    def set_session_id(self, chat_id: int, session_id: str) -> None:
+    def set_session_id(self, chat_id: int, session_id: str, provider: str = "") -> None:
         self._data.setdefault("sessions", {})[str(chat_id)] = session_id
+        provider = provider.strip().lower()
+        if provider:
+            self._data.setdefault("provider_sessions", {}).setdefault(str(chat_id), {})[provider] = session_id
         self.save()
 
-    def clear_session_id(self, chat_id: int) -> None:
+    def clear_session_id(self, chat_id: int, provider: str = "") -> None:
+        provider = provider.strip().lower()
+        if provider:
+            self._data.setdefault("provider_sessions", {}).setdefault(str(chat_id), {}).pop(provider, None)
+            if self._data.get("sessions", {}).get(str(chat_id), "").startswith(f"{provider}:"):
+                self._data.setdefault("sessions", {}).pop(str(chat_id), None)
+            self.save()
+            return
         self._data.setdefault("sessions", {}).pop(str(chat_id), None)
+        self._data.setdefault("provider_sessions", {}).pop(str(chat_id), None)
         self.save()
 
 
@@ -508,6 +611,16 @@ class SQLiteMessageStore:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_board_action_cards_chat ON board_action_cards(chat_id, card_type)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conversation_memory (
+                    chat_id INTEGER PRIMARY KEY,
+                    summary_text TEXT NOT NULL,
+                    source_max_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
             connection.execute(
                 """
@@ -616,6 +729,152 @@ class SQLiteMessageStore:
             "recorded_at": row["recorded_at"],
             "metadata": metadata,
         }
+
+    def recent_context_rows(self, *, chat_id: int, limit: int) -> list[dict[str, str]]:
+        limit = max(1, min(30, limit))
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT direction, event_type, text, transcript
+                    FROM telegram_messages
+                    WHERE
+                        direction IN ('in', 'out')
+                        AND (chat_id = ? OR chat_id IS NULL)
+                        AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, limit),
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to load shared context rows chat_id=%s", chat_id)
+            return []
+        payload = []
+        for row in reversed(rows):
+            event_type = row["event_type"] or ""
+            role = "user" if row["direction"] == "in" or event_type.startswith("desktop_user") else "assistant"
+            text = (row["transcript"] or row["text"] or "").strip()
+            if text:
+                payload.append({"role": role, "text": text})
+        return payload
+
+    def continuity_summary(self, *, chat_id: int, recent_limit: int) -> str:
+        recent_limit = max(1, min(30, recent_limit))
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                max_id = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(id), 0)
+                    FROM telegram_messages
+                    WHERE
+                        direction IN ('in', 'out')
+                        AND (chat_id = ? OR chat_id IS NULL)
+                        AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                    """,
+                    (chat_id,),
+                ).fetchone()[0]
+                cached = connection.execute(
+                    """
+                    SELECT summary_text, source_max_id
+                    FROM conversation_memory
+                    WHERE chat_id = ?
+                    """,
+                    (chat_id,),
+                ).fetchone()
+                if cached and int(cached["source_max_id"]) == int(max_id):
+                    return str(cached["summary_text"] or "")
+
+                rows = connection.execute(
+                    """
+                    SELECT id, direction, event_type, text, transcript, session_id, recorded_at
+                    FROM telegram_messages
+                    WHERE
+                        direction IN ('in', 'out')
+                        AND (chat_id = ? OR chat_id IS NULL)
+                        AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, recent_limit + 80),
+                ).fetchall()
+                summary_rows = list(reversed(rows[recent_limit:])) if len(rows) > recent_limit else []
+                summary = self._build_continuity_summary(summary_rows)
+                connection.execute(
+                    """
+                    INSERT INTO conversation_memory (chat_id, summary_text, source_max_id, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        summary_text = excluded.summary_text,
+                        source_max_id = excluded.source_max_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    (chat_id, summary, int(max_id), utc_now()),
+                )
+                return summary
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to build continuity summary chat_id=%s", chat_id)
+            return ""
+
+    @staticmethod
+    def _compact_memory_line(text: str, limit: int = 220) -> str:
+        text = " ".join(text.strip().split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "..."
+
+    @classmethod
+    def _build_continuity_summary(cls, rows: list[sqlite3.Row]) -> str:
+        if not rows:
+            return ""
+        user_goals: list[str] = []
+        assistant_outcomes: list[str] = []
+        setup_facts: list[str] = []
+        fact_markers = (
+            "repo",
+            "github",
+            "install",
+            "installed",
+            "running",
+            "server",
+            "port",
+            "model",
+            "provider",
+            "kokoro",
+            "gemini",
+            "codex",
+            "claude",
+            "jcode",
+            "sqlite",
+            "update",
+            "path",
+        )
+        for row in rows:
+            event_type = row["event_type"] or ""
+            role = "user" if row["direction"] == "in" or event_type.startswith("desktop_user") else "assistant"
+            text = (row["transcript"] or row["text"] or "").strip()
+            if not text:
+                continue
+            line = cls._compact_memory_line(text)
+            lowered = line.lower()
+            if any(marker in lowered for marker in fact_markers):
+                setup_facts.append(line)
+            if role == "user":
+                user_goals.append(line)
+            else:
+                assistant_outcomes.append(line)
+
+        sections: list[str] = []
+        if user_goals:
+            sections.append("User goals and decisions: " + " | ".join(user_goals[-5:]))
+        if setup_facts:
+            deduped_facts = list(dict.fromkeys(setup_facts[-8:]))
+            sections.append("Relevant setup facts: " + " | ".join(deduped_facts))
+        if assistant_outcomes:
+            sections.append("Recent assistant outcomes: " + " | ".join(assistant_outcomes[-5:]))
+        return "\n".join(sections)
 
     def upsert_supervisor_identity(self, *, identity_key: str, value: dict[str, Any]) -> None:
         payload = json.dumps(value, ensure_ascii=True, default=str)
@@ -892,17 +1151,45 @@ class RemoteFirstWhisperTranscriber:
 
 
 class CodexBridge:
-    def __init__(self, workdir: Path, model: str, timeout_seconds: int, safety_mode: str = "safe"):
+    def __init__(
+        self,
+        workdir: Path,
+        model: str,
+        timeout_seconds: int,
+        safety_mode: str = "safe",
+        access_scope: str = "workspace",
+        allowed_paths: Optional[list[Path]] = None,
+        action_mode: str = "full",
+    ):
         self.workdir = workdir
         self.model = model.strip()
         self.timeout_seconds = timeout_seconds
         self.safety_mode = safety_mode
+        self.access_scope = access_scope
+        self.allowed_paths = allowed_paths or []
+        self.action_mode = action_mode
 
     @property
     def execution_dir(self) -> Path:
-        if self.safety_mode == "code":
+        if self.access_scope == "code":
             return PROJECT_ROOT
         return self.workdir
+
+    def writable_dirs(self) -> list[Path]:
+        if self.access_scope == "full":
+            return []
+        dirs = [self.execution_dir]
+        if self.access_scope == "code" and self.workdir != PROJECT_ROOT:
+            dirs.append(self.workdir)
+        dirs.extend(self.allowed_paths)
+        unique = []
+        seen = set()
+        for path in dirs:
+            key = str(path.resolve())
+            if key not in seen:
+                unique.append(path)
+                seen.add(key)
+        return unique
 
     def _base_command(self, proposal_mode: bool = False) -> list[str]:
         cmd = [
@@ -915,12 +1202,14 @@ class CodexBridge:
         ]
         if proposal_mode:
             cmd.extend(["--sandbox", "read-only", "--ephemeral"])
-        elif self.safety_mode == "full":
+        elif self.access_scope == "full" and self.action_mode == "full":
             cmd.append("--dangerously-bypass-approvals-and-sandbox")
-        elif self.safety_mode in {"restricted", "safe", "code"}:
-            cmd.extend(["--sandbox", "workspace-write"])
+        elif self.action_mode == "read":
+            cmd.extend(["--sandbox", "read-only"])
         else:
             cmd.extend(["--sandbox", "workspace-write"])
+            for path in self.writable_dirs()[1:]:
+                cmd.extend(["--add-dir", str(path)])
         if self.model:
             cmd.extend(["-m", self.model])
         return cmd
@@ -1295,47 +1584,150 @@ class GenericCliBridge:
 
 
 class LocalCliBridge:
-    def __init__(self, provider: str, workdir: Path, timeout_seconds: int):
+    def __init__(
+        self,
+        provider: str,
+        workdir: Path,
+        timeout_seconds: int,
+        model: str = "",
+        jcode_provider_profile: str = "",
+        jcode_provider_id: str = "",
+        jcode_api_key: str = "",
+        jcode_base_url: str = "",
+        action_mode: str = "full",
+    ):
         self.provider = provider
         self.workdir = workdir
         self.timeout_seconds = timeout_seconds
+        self.model = model.strip()
+        self.jcode_provider_profile = jcode_provider_profile.strip()
+        self.jcode_provider_id = jcode_provider_id.strip()
+        self.jcode_api_key = jcode_api_key.strip()
+        self.jcode_base_url = jcode_base_url.strip().rstrip("/")
+        self.action_mode = action_mode.strip().lower()
 
     def _command(self, prompt: str, session_id: Optional[str]) -> tuple[list[str], Optional[str]]:
         if self.provider == "claude":
             cmd = ["claude", "-p", "--dangerously-skip-permissions", "--output-format", "text"]
+            if self.model and self.model != "default":
+                cmd.extend(["--model", self.model])
             if session_id:
                 cmd.append("--continue")
             return cmd, prompt
         if self.provider == "gemini":
-            cmd = ["gemini", "-p", "", "--yolo", "--skip-trust", "--output-format", "text"]
+            cmd = ["gemini", "--prompt", "", "--skip-trust", "--output-format", "text"]
+            if self.model and self.model != "default":
+                cmd.extend(["--model", self.model])
+            approval_mode = "plan" if self.action_mode == "read" else "default" if self.action_mode == "approve" else "yolo"
+            cmd.extend(["--approval-mode", approval_mode])
             if session_id:
                 cmd.extend(["--resume", "latest"])
             return cmd, prompt
-        if self.provider == "opencode":
+        if self.provider == "jcode":
+            self._ensure_jcode_api_key()
+            profile = self.jcode_provider_profile or self._ensure_jcode_local_profile()
             cmd = [
-                self._opencode_executable(),
-                "run",
-                "--dangerously-skip-permissions",
-                "--format",
-                "default",
-                "--dir",
-                str(self.workdir),
+                self._jcode_executable(),
+                "--quiet",
+                "--no-update",
+                "--no-selfdev",
             ]
-            if session_id:
-                cmd.append("--continue")
-            cmd.append(prompt)
+            if profile:
+                cmd.extend(["--provider-profile", profile])
+            elif self.jcode_provider_id:
+                cmd.extend(["--provider", self.jcode_provider_id])
+            if self.model:
+                cmd.extend(["--model", self.model])
+            if session_id and not session_id.startswith("jcode:latest"):
+                cmd.extend(["--resume", session_id])
+            cmd.extend(["run", "--json", prompt])
             return cmd, None
         raise RuntimeError(f"Unsupported provider: {self.provider}")
 
-    def _opencode_executable(self) -> str:
-        for name in ("opencode.cmd", "opencode.exe", "opencode"):
+    def _jcode_executable(self) -> str:
+        for name in ("jcode.exe", "jcode"):
             path = shutil.which(name)
             if path:
                 return path
-        raise RuntimeError("Could not find opencode on PATH")
+        raise RuntimeError("Could not find jcode on PATH")
+
+    def _ensure_jcode_api_key(self) -> None:
+        if not self.jcode_api_key or self.jcode_provider_id in {"", "lmstudio", "ollama"}:
+            return
+        subprocess.run(
+            [
+                self._jcode_executable(),
+                "login",
+                "--provider",
+                self.jcode_provider_id,
+                "--api-key",
+                self.jcode_api_key,
+                "--no-validate",
+                "--quiet",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(self.workdir),
+            timeout=30,
+            **hidden_subprocess_kwargs(),
+        )
+
+    def _ensure_jcode_local_profile(self) -> str:
+        if self.jcode_provider_id not in {"lmstudio", "ollama"} or not self.jcode_base_url or not self.model:
+            return ""
+        profile = f"baseclaw-{self.jcode_provider_id}"
+        result = subprocess.run(
+            [
+                self._jcode_executable(),
+                "provider",
+                "add",
+                profile,
+                "--base-url",
+                self.jcode_base_url,
+                "--model",
+                self.model,
+                "--no-api-key",
+                "--auth",
+                "none",
+                "--overwrite",
+                "--quiet",
+            ],
+            text=True,
+            capture_output=True,
+            cwd=str(self.workdir),
+            timeout=30,
+            **hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            LOGGER.warning("Failed to configure JCode local profile provider=%s base_url=%s error=%s", self.jcode_provider_id, self.jcode_base_url, detail)
+            return ""
+        return profile
+
+    def _parse_jcode_output(self, output: str, fallback_session_id: Optional[str]) -> tuple[str, str]:
+        try:
+            payload = json.loads(output)
+        except json.JSONDecodeError:
+            return fallback_session_id or "jcode:latest", output
+        if not isinstance(payload, dict):
+            return fallback_session_id or "jcode:latest", output
+        reply = str(payload.get("text") or "").strip()
+        if not reply:
+            reply = "I received an empty response from jcode. Please try that once more; I will keep the reply conversational instead of sending raw harness JSON."
+        session_id = str(payload.get("session_id") or fallback_session_id or "jcode:latest")
+        return session_id, reply
 
     def send(self, prompt: str, session_id: Optional[str]) -> tuple[str, str]:
         cmd, stdin_text = self._command(prompt, session_id)
+        env = agent_subprocess_env()
+        if self.provider == "jcode":
+            env.setdefault("JCODE_NO_TELEMETRY", "1")
+            if self.jcode_base_url:
+                env["BASECLAW_JCODE_BASE_URL"] = self.jcode_base_url
+                env["OPENAI_BASE_URL"] = self.jcode_base_url
+                env["LM_STUDIO_BASE_URL"] = self.jcode_base_url
+                if self.jcode_provider_id == "ollama":
+                    env["OLLAMA_HOST"] = self.jcode_base_url.removesuffix("/v1")
         try:
             process = subprocess.run(
                 cmd,
@@ -1345,7 +1737,7 @@ class LocalCliBridge:
                 cwd=str(self.workdir),
                 encoding="utf-8",
                 errors="replace",
-                env=agent_subprocess_env(),
+                env=env,
                 timeout=self.timeout_seconds,
                 **hidden_subprocess_kwargs(),
             )
@@ -1357,15 +1749,35 @@ class LocalCliBridge:
             raise RuntimeError(detail or f"{self.provider} exited with code {process.returncode}")
         if not output:
             raise RuntimeError(f"{self.provider} returned no stdout reply")
+        if self.provider == "jcode":
+            return self._parse_jcode_output(output, session_id)
         return session_id or f"{self.provider}:latest", output
 
 
 def build_agent_bridge(config: OperatorConfig):
     provider = config.agent_provider.strip().lower() or "codex"
     if provider == "codex":
-        return CodexBridge(config.workdir, config.codex_model, config.agent_timeout_seconds, config.safety_mode)
-    if provider in {"claude", "gemini", "opencode"} and not config.agent_command.strip():
-        return LocalCliBridge(provider, config.workdir, config.agent_timeout_seconds)
+        return CodexBridge(
+            config.workdir,
+            config.codex_model,
+            config.agent_timeout_seconds,
+            config.safety_mode,
+            config.access_scope,
+            config.allowed_paths,
+            config.action_mode,
+        )
+    if provider in {"claude", "gemini", "jcode"} and not config.agent_command.strip():
+        return LocalCliBridge(
+            provider,
+            config.workdir,
+            config.agent_timeout_seconds,
+            config.codex_model,
+            config.jcode_provider_profile,
+            config.jcode_provider_id,
+            config.jcode_api_key,
+            config.jcode_base_url,
+            config.action_mode,
+        )
     return GenericCliBridge(provider, config.workdir, config.agent_command, config.agent_timeout_seconds)
 
 
@@ -1735,10 +2147,10 @@ class TelegramCodexOperator:
         source = "Telegram voice note transcript" if transcript else "Telegram text"
         return "\n\n".join(
             [
-                "You are preparing a RESTRICTED MODE proposal for a Telegram-controlled coding agent.",
-                "Do not modify files, do not run mutating commands, do not install packages, do not start or stop services, and do not access paths outside the assigned workspace.",
+                "You are preparing an approval-mode proposal for a Telegram-controlled coding agent.",
+                "Do not modify files, do not run mutating commands, do not install packages, do not start or stop services, and do not access paths outside the configured access scope.",
                 "Your only job is to inspect the request text and produce a concise approval card for the user.",
-                f"Assigned workspace: {self.config.workdir}",
+                self._access_policy_prompt_block(),
                 f"Selected execution provider after approval: {self.config.agent_provider}",
                 f"Sender: {telegram_user}",
                 f"Source: {source}",
@@ -1760,15 +2172,21 @@ class TelegramCodexOperator:
         transcript: Optional[str],
         proposal: str,
         reply_context: Optional[str] = None,
+        shared_context: Optional[str] = None,
     ) -> str:
-        base_prompt = self._build_prompt(telegram_user, body, transcript, reply_context=reply_context)
+        base_prompt = self._build_prompt(
+            telegram_user,
+            body,
+            transcript,
+            reply_context=reply_context,
+            shared_context=shared_context,
+        )
         safe_mode_context = "\n\n".join(
             [
-                "RESTRICTED MODE APPROVAL CONTEXT:",
+                "APPROVAL MODE CONTEXT:",
                 "The user approved the proposal below through a Telegram inline keyboard.",
-                "Stay inside the assigned workspace unless the approved proposal explicitly names outside paths or outside-machine actions.",
-                f"Assigned workspace: {self.config.workdir}",
-                "If the task requires unapproved file changes, destructive actions, credential access, service restarts, or paths outside the assigned workspace, stop and ask for a new approval instead of proceeding.",
+                self._access_policy_prompt_block(),
+                "If the task requires unapproved file changes, destructive actions, credential access, service restarts, or paths outside the configured access scope, stop and ask for a new approval instead of proceeding.",
                 "Approved proposal:",
                 proposal.strip(),
             ]
@@ -1962,13 +2380,22 @@ class TelegramCodexOperator:
             **hidden_subprocess_kwargs(),
         )
 
+    def _is_git_repo(self) -> bool:
+        result = self._git_command(["rev-parse", "--is-inside-work-tree"])
+        return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
     def _git_dirty(self) -> bool:
+        if not self._is_git_repo():
+            return False
         result = self._git_command(["status", "--porcelain", "--untracked-files=normal"])
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout).strip() or "git status failed")
         return bool(result.stdout.strip())
 
     def _git_commit_all(self, message: str) -> Optional[str]:
+        if not self._is_git_repo():
+            LOGGER.info("Skipping git checkpoint because this install is not a git repository.")
+            return None
         if not self._git_dirty():
             return None
         add_result = self._git_command(["add", "-A"])
@@ -1983,7 +2410,7 @@ class TelegramCodexOperator:
         return None
 
     def _prepare_code_mode_checkpoint(self) -> Optional[str]:
-        if self.config.safety_mode != "code":
+        if self.config.access_scope != "code" or self.config.action_mode == "read":
             return None
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         commit = self._git_commit_all(f"Code mode pre-run checkpoint {stamp}")
@@ -1992,7 +2419,7 @@ class TelegramCodexOperator:
         return commit
 
     def _commit_code_mode_result(self) -> Optional[str]:
-        if self.config.safety_mode != "code":
+        if self.config.access_scope != "code" or self.config.action_mode == "read":
             return None
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         commit = self._git_commit_all(f"Code mode agent changes {stamp}")
@@ -2144,7 +2571,7 @@ class TelegramCodexOperator:
         if len(body_text) > 1200:
             body_text = body_text[:1197].rstrip() + "..."
         return (
-            "New Raspberry Pi board entry noticed.\n"
+            "New shared board entry noticed.\n"
             f"From: {entry.get('agent', 'unknown')}\n"
             f"Type: {entry.get('type', 'unknown')}\n"
             f"Thread: {entry.get('thread_id', 'none')}\n"
@@ -2229,7 +2656,7 @@ class TelegramCodexOperator:
         meta_text = json.dumps(meta, ensure_ascii=False, indent=2) if isinstance(meta, dict) else str(meta or "")
         return "\n\n".join(
             [
-                "Handle the following Raspberry Pi board entry.",
+                "Handle the following shared board entry.",
                 "The user clicked the inline Proceed button for this exact entry.",
                 "Do not treat unrelated recent chat context as approval for a different board item.",
                 "If this is a source update candidate, review it according to SOURCE_CONTRIBUTION_REVIEW.md and report a result. Do not silently promote it to baseline.",
@@ -2334,7 +2761,7 @@ class TelegramCodexOperator:
         if not remote:
             return (
                 "Update blocked: no usable source update remote is configured. "
-                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a Pi mirror remote."
+                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a source mirror remote."
             )
         fetch = self._git_command(["fetch", remote, branch])
         if fetch.returncode != 0:
@@ -2363,7 +2790,7 @@ class TelegramCodexOperator:
             f"Ref: {ref}\n"
             f"Current commit: {current_text}\n"
             f"Local changes: {dirty}\n\n"
-            "This will fetch from the Raspberry Pi and fast-forward only. It will not overwrite local edits."
+            "This will fetch from the configured source mirror and fast-forward only. It will not overwrite local edits."
         )
 
     def _pull_manual_update(self, requested_ref: Optional[str] = None) -> str:
@@ -2373,7 +2800,7 @@ class TelegramCodexOperator:
         if not remote:
             return (
                 "Update blocked: no usable source update remote is configured. "
-                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a Pi mirror remote."
+                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a source mirror remote."
             )
         ref = self._manual_update_ref(requested_ref)
         fetch = self._git_command(["fetch", remote, ref])
@@ -2397,8 +2824,8 @@ class TelegramCodexOperator:
         names = {line.strip() for line in remotes.stdout.splitlines() if line.strip()}
         if preferred and preferred in names:
             return preferred
-        if "pi-mirror" in names:
-            return "pi-mirror"
+        if "source-mirror" in names:
+            return "source-mirror"
         if "origin" in names:
             origin_url = self._git_command(["remote", "get-url", "origin"])
             if origin_url.returncode == 0:
@@ -2721,10 +3148,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await self._send_voice_reply(context, chat_id, text)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
+            voice_error = friendly_voice_error(exc)
             fallback = (
-                f"{text}\n\n[Voice reply failed: {exc}]"
+                f"{text}\n\n[Voice reply failed: {voice_error}]"
                 if len(text) <= 3200
-                else f"Voice reply failed: {exc}"
+                else f"Voice reply failed: {voice_error}"
             )
             await self._send_text_chunks(context, chat_id, fallback)
         else:
@@ -2749,19 +3177,17 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         transcript: Optional[str],
         *,
         reply_context: Optional[str] = None,
+        shared_context: Optional[str] = None,
     ) -> str:
         parts = [
             "You are responding through a Telegram operator bridge running on the user's own machine.",
             f"The selected coding agent provider is {self.config.agent_provider}.",
+            self._agent_backend_prompt_block(),
             "The user has explicitly granted full local permissions to this bridge.",
             "You are the baseline local assistant: lightweight, practical, and able to learn or add capabilities only when the user's goals make them necessary.",
             f"Use this workspace home for unspecified files and experiments: {self.config.workdir}",
             "Prefer small, understandable steps over building a large framework before it is needed.",
-            f"Safety mode: {self.config.safety_mode}.",
-            "In safe mode, read and write inside the workspace; ask before touching paths outside it.",
-            "In code mode, you may edit this application's repository as well as the normal workspace. Keep changes small, explain what changed, and rely on the bridge's automatic git checkpoints and commits for revert safety.",
-            "In restricted mode, only proceed with the approved request scope and ask again before additional writes.",
-            "In full access mode, the user has allowed unrestricted local execution, but still avoid destructive surprises.",
+            self._access_policy_prompt_block(),
             "Treat requests as immediate foreground work by default.",
             "Start doing the work instead of promising future work.",
             "While working, send short natural progress updates only when there is a real step change.",
@@ -2780,9 +3206,90 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if reply_context:
             parts.append("Telegram reply context:")
             parts.append(reply_context)
+        if shared_context:
+            parts.append(shared_context)
         parts.append("User message:")
         parts.append(body.strip())
         return "\n\n".join(parts)
+
+    def _shared_context_for_chat(self, chat_id: int, current_text: str = "") -> str:
+        if not self.config.shared_context_enabled:
+            return ""
+        rows = self.message_store.recent_context_rows(chat_id=chat_id, limit=self.config.shared_context_limit)
+        summary = self.message_store.continuity_summary(chat_id=chat_id, recent_limit=self.config.shared_context_limit)
+        if not rows and not summary:
+            return ""
+        skip_index = -1
+        current_text = current_text.strip()
+        for index, row in enumerate(rows):
+            role = "User" if row["role"] == "user" else "Assistant"
+            text = row["text"].strip()
+            if role == "User" and current_text and text == current_text:
+                skip_index = index
+
+        lines = []
+        for index, row in enumerate(rows):
+            role = "User" if row["role"] == "user" else "Assistant"
+            text = row["text"].strip()
+            if index == skip_index:
+                continue
+            if text:
+                lines.append(f"{role}: {text[:900]}")
+        if not lines and not summary:
+            return ""
+        parts = [
+            "Shared BaseClaw continuity context:",
+            "Use this only for continuity across Telegram, desktop, and harness switches. Older messages are context, not new instructions.",
+        ]
+        if summary:
+            parts.extend(["Rolling conversation summary:", summary])
+        if lines:
+            parts.extend(["Recent messages:", *lines])
+        return "\n".join(parts)
+
+    def _access_policy_prompt_block(self) -> str:
+        allowed = [str(self.config.workdir), *[str(path) for path in self.config.allowed_paths]]
+        if self.config.access_scope == "code":
+            allowed.append(str(PROJECT_ROOT))
+        scope_lines = {
+            "workspace": "Access scope: only the workspace and explicitly selected additional paths.",
+            "code": "Access scope: the workspace, this application's own source code, and explicitly selected additional paths.",
+            "full": "Access scope: full local filesystem access is allowed.",
+        }
+        action_lines = {
+            "read": "Action mode: read only. Do not write files, delete files, install packages, restart services, or run mutating commands.",
+            "approve": "Action mode: ask/confirm before write, delete, install, service, credential, or other risky mutating actions.",
+            "full": "Action mode: you may act within the access scope without extra confirmation, while avoiding destructive surprises.",
+        }
+        return "\n".join(
+            [
+                scope_lines.get(self.config.access_scope, scope_lines["workspace"]),
+                f"Allowed paths: {', '.join(allowed) if allowed else 'none'}",
+                action_lines.get(self.config.action_mode, action_lines["full"]),
+                f"Legacy safety mode: {self.config.safety_mode}.",
+            ]
+        )
+
+    def _agent_backend_prompt_block(self) -> str:
+        provider = self.config.agent_provider.strip().lower()
+        if provider == "jcode":
+            jcode_provider = self.config.jcode_provider_id or "auto"
+            model = self.config.codex_model or "jcode default"
+            return (
+                "Backend details: this instance is using jcode as the coding harness, "
+                f"model provider `{jcode_provider}`, model `{model}`, and base URL `{self.config.jcode_base_url or 'provider default'}`. "
+                "For LM Studio and Ollama, model discovery uses the configured model host and LLM port."
+            )
+        if provider == "codex":
+            model = self.config.codex_model or "Codex CLI default"
+            return f"Backend details: this instance is using the Codex CLI with model `{model}`."
+        if provider == "claude":
+            model = self.config.codex_model or "Claude CLI default"
+            return f"Backend details: this instance is using the Claude CLI with model `{model}`."
+        if provider == "gemini":
+            model = self.config.codex_model or "Gemini CLI default"
+            return f"Backend details: this instance is using the Gemini CLI with model `{model}`."
+        return f"Backend details: this instance is using provider `{self.config.agent_provider}`."
 
     async def _process_user_message(
         self,
@@ -2801,8 +3308,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self._authorized(chat_id):
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
+        shared_context = self._shared_context_for_chat(chat_id, current_text=text)
 
-        if self.config.safety_mode == "restricted" and approved_proposal is None:
+        if self.config.action_mode == "approve" and approved_proposal is None:
             try:
                 if keepalive is None:
                     action = ChatAction.RECORD_VOICE if transcript else ChatAction.TYPING
@@ -2813,7 +3321,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
 
         async with self._lock_for(chat_id):
-            session_id = self.state.get_session_id(chat_id)
+            session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
             action = ChatAction.RECORD_VOICE if transcript else ChatAction.TYPING
             if keepalive is None:
                 keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, action))
@@ -2839,9 +3347,16 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                         transcript,
                         approved_proposal,
                         reply_context=reply_context,
+                        shared_context=shared_context,
                     )
                 else:
-                    prompt = self._build_prompt(username, text, transcript, reply_context=reply_context)
+                    prompt = self._build_prompt(
+                        username,
+                        text,
+                        transcript,
+                        reply_context=reply_context,
+                        shared_context=shared_context,
+                    )
                 code_mode_checkpoint = await asyncio.to_thread(self._prepare_code_mode_checkpoint)
                 new_session_id, reply_text = await asyncio.to_thread(
                     self._send_agent_prompt,
@@ -2866,7 +3381,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 reply_text = f"{reply_text}\n\nCode mode git safety: committed " + " and ".join(notes) + "."
 
             if new_session_id:
-                self.state.set_session_id(chat_id, new_session_id)
+                self.state.set_session_id(chat_id, new_session_id, self.config.agent_provider)
 
             self.memory_log.append(
                 {
@@ -2923,10 +3438,10 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await self._send_text_message(
             context,
             update.effective_chat.id,
-            "BaseClaw is online. Send text or voice notes.",
+            startup_summary(self.config, source="operator"),
             event_type="command_start_reply",
         )
-        await self._send_voice_reply(context, update.effective_chat.id, "BaseClaw is online.")
+        await self._send_voice_reply(context, update.effective_chat.id, "BaseClaw operator is online.")
 
     async def reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -2953,22 +3468,28 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         await self._send_text_message(
             context,
             chat_id,
-            "Reset clears this chat's persisted Codex session. Are you sure?",
+            "Reset clears this chat's persisted sessions for all harnesses. Are you sure?",
             event_type="command_reset_confirm",
             reply_markup=keyboard,
         )
 
     def _status_text(self, chat_id: int) -> str:
-        session_id = self.state.get_session_id(chat_id)
+        session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
         try:
             codex_status = f"available at {codex_executable()}"
         except RuntimeError as exc:
             codex_status = str(exc)
         return (
             f"Provider: {self.config.agent_provider}\n"
+            f"Model provider: {self.config.jcode_provider_id or 'n/a'}\n"
+            f"Model/base URL: {self.config.codex_model or 'default'} / {self.config.jcode_base_url or 'provider default'}\n"
             f"Workdir: {self.config.workdir}\n"
             f"Session: {session_id or 'none'}\n"
-            f"Safety mode: {self.config.safety_mode}\n"
+            f"Access scope: {self.config.access_scope}\n"
+            f"Action mode: {self.config.action_mode}\n"
+            f"Shared context: {'on' if self.config.shared_context_enabled else 'off'}\n"
+            f"Allowed paths: {', '.join(str(path) for path in self.config.allowed_paths) or 'none'}\n"
+            f"Legacy safety mode: {self.config.safety_mode}\n"
             f"Codex: {codex_status}\n"
             f"Voice: {self.config.kokoro_voice}\n"
             f"Whisper model: {self.config.whisper_model_name}\n"
@@ -3026,13 +3547,13 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                     InlineKeyboardButton("Restart", callback_data="menu:restart"),
                     InlineKeyboardButton("Reset session", callback_data="menu:reset"),
                 ],
-                [InlineKeyboardButton("Update from Pi", callback_data="menu:update")],
+                [InlineKeyboardButton("Update from Source", callback_data="menu:update")],
             ]
         )
         text = (
             "BaseClaw help menu.\n"
             "Use the buttons below for common operator actions.\n\n"
-            "Board behavior: supervisor-to-supervisor messages should go through targeted Raspberry Pi board entries, so the recipient can handle them with the right context."
+            "Board behavior: supervisor-to-supervisor messages should go through targeted shared board entries, so the recipient can handle them with the right context."
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
 
@@ -4116,7 +4637,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         self.state.clear_session_id(chat_id)
         await query.answer("Session reset.")
-        await query.edit_message_text("Cleared the persisted Codex session for this chat.")
+        await query.edit_message_text("Cleared the persisted sessions for this chat.")
 
     async def on_menu_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -4218,7 +4739,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await query.answer("Unknown update action.", show_alert=True)
             return
         ref = self.pending_manual_updates.pop(chat_id, None) or self._manual_update_ref()
-        await query.answer("Updating from Pi.")
+        await query.answer("Updating from source.")
         result = await asyncio.to_thread(self._pull_manual_update, ref)
         await self._send_text_message(context, chat_id, result, event_type="manual_update_result")
         try:
@@ -4408,7 +4929,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 context,
                 prompt,
                 transcript=None,
-                approved_proposal="User clicked Proceed on a Raspberry Pi board entry inline keyboard.",
+                approved_proposal="User clicked Proceed on a shared board entry inline keyboard.",
             )
         )
 
@@ -4445,14 +4966,20 @@ def load_config() -> OperatorConfig:
     safety_mode = os.environ.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip().lower()
     if safety_mode not in {"restricted", "safe", "code", "full"}:
         safety_mode = "restricted" if parse_bool(os.environ.get("TELEGRAM_OPERATOR_SAFE_MODE", ""), False) else "safe"
+    access_scope = os.environ.get("TELEGRAM_OPERATOR_ACCESS_SCOPE", "").strip().lower()
+    if access_scope not in {"workspace", "code", "full"}:
+        access_scope = "code" if safety_mode == "code" else "full" if safety_mode == "full" else "workspace"
+    action_mode = os.environ.get("TELEGRAM_OPERATOR_ACTION_MODE", "").strip().lower()
+    if action_mode not in {"read", "approve", "full"}:
+        action_mode = "approve" if safety_mode == "restricted" else "full"
     history_remote = os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip()
     history_ssh_key_path = resolve_app_path(
         os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""),
-        Path.home() / "Downloads" / "maat_pi_board_ed25519",
+        BASE_DIR / "telegram_operator_board_ed25519",
     )
     history_known_hosts_path = resolve_app_path(
         os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""),
-        Path.home() / "Downloads" / "maat_pi_known_hosts",
+        BASE_DIR / "telegram_operator_board_known_hosts",
     )
     history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
     supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "").strip()
@@ -4482,10 +5009,19 @@ def load_config() -> OperatorConfig:
             f"{supervisor_id},{history_agent_name},developer-agent",
         )
     )
+    jcode_provider_id = os.environ.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
+    jcode_base_url = os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
+    if jcode_provider_id in {"lmstudio", "ollama"}:
+        remote_host = os.environ.get("TELEGRAM_OPERATOR_REMOTE_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        llm_port = "11434" if jcode_provider_id == "ollama" else "1234"
+        jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
         bot_token=require_env("TELEGRAM_BOT_TOKEN"),
         allowed_chat_ids=parse_allowed_chat_ids(require_env("TELEGRAM_ALLOWED_CHAT_IDS")),
         workdir=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_WORKDIR", ""), DEFAULT_WORKSPACE),
+        access_scope=access_scope,
+        allowed_paths=parse_path_list(os.environ.get("TELEGRAM_OPERATOR_ALLOWED_PATHS", "")),
+        action_mode=action_mode,
         state_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_STATE_PATH", ""), BASE_DIR / "telegram_operator_state.json"),
         memory_log_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_MEMORY_LOG", ""), BASE_DIR / "telegram_operator_memory.jsonl"),
         sqlite_path=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_SQLITE_PATH", ""), BASE_DIR / "telegram_operator_messages.sqlite3"),
@@ -4500,8 +5036,14 @@ def load_config() -> OperatorConfig:
         agent_command=os.environ.get("TELEGRAM_OPERATOR_AGENT_COMMAND", ""),
         agent_timeout_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS", ""), 900),
         codex_model=os.environ.get("TELEGRAM_OPERATOR_CODEX_MODEL", ""),
+        jcode_provider_id=jcode_provider_id,
+        jcode_api_key=os.environ.get("TELEGRAM_OPERATOR_JCODE_API_KEY", ""),
+        jcode_provider_profile=os.environ.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", ""),
+        jcode_base_url=jcode_base_url,
+        shared_context_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", ""), False),
+        shared_context_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_LIMIT", ""), 12),
         safety_mode=safety_mode,
-        safe_mode=safety_mode != "full",
+        safe_mode=action_mode != "full" or access_scope != "full",
         supervisor_id=supervisor_id,
         supervisor_name=supervisor_name,
         supervisor_role=supervisor_role,
@@ -4520,13 +5062,13 @@ def load_config() -> OperatorConfig:
         board_poll_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", ""), True),
         board_poll_interval_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS", ""), 180),
         board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
-        board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "/home/ai/agent_board/entries.ndjson").strip(),
+        board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "").strip(),
         board_state_path=resolve_app_path(
             os.environ.get("TELEGRAM_OPERATOR_BOARD_STATE_PATH", ""),
             BASE_DIR / "telegram_operator_board_state.json",
         ),
         board_agent_aliases=board_aliases,
-        source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "pi-mirror").strip() or "pi-mirror",
+        source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "").strip(),
         manual_update_ref=os.environ.get("TELEGRAM_OPERATOR_MANUAL_UPDATE_REF", DEFAULT_MANUAL_UPDATE_REF).strip()
         or DEFAULT_MANUAL_UPDATE_REF,
         supervisor_device_label=supervisor_device_label,
@@ -4548,12 +5090,13 @@ async def main() -> None:
     if config.agent_provider == "codex":
         codex_executable()
     LOGGER.info(
-        "Starting Telegram operator provider=%s workdir=%s voice=%s whisper=%s safety=%s timeout=%ss",
+        "Starting Telegram operator provider=%s workdir=%s voice=%s whisper=%s access=%s action=%s timeout=%ss",
         config.agent_provider,
         config.workdir,
         config.kokoro_voice,
         config.whisper_model_name,
-        config.safety_mode,
+        config.access_scope,
+        config.action_mode,
         config.agent_timeout_seconds,
     )
     operator = TelegramCodexOperator(config)
@@ -4596,12 +5139,7 @@ async def main() -> None:
             try:
                 await application.bot.send_message(
                     chat_id=chat_id,
-                    text=(
-                        "BaseClaw is online.\n"
-                        f"Voice: {config.kokoro_voice}\n"
-                        f"Safety: {config.safety_mode}\n"
-                        f"Speech hosts: {', '.join(config.kokoro_urls) or 'none'}"
-                    ),
+                    text=startup_summary(config, source="operator"),
                 )
             except Exception:
                 LOGGER.exception("Failed to send startup notice chat_id=%s", chat_id)

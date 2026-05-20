@@ -22,6 +22,7 @@ docs/
   INSTALLATION_MODES.md
   KOKORO_REMOTE_USAGE.md
   TELEGRAM_CODEX_OPERATOR.md
+  TROUBLESHOOTING.md
   PUBLISHING.md
 agent_workspace/
 custom_voices/
@@ -36,4 +37,4 @@ Root convenience scripts:
 - `start-ui.ps1`
 - `run-operator.ps1`
 
-Runtime files such as `.env.telegram-operator`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
+Runtime files such as `.env.telegram-operator`, `profiles/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.

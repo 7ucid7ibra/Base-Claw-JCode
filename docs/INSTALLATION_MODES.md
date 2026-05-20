@@ -66,15 +66,15 @@ Then open:
 .\start-ui.ps1
 ```
 
-Set `Remote speech host` to the host machine, for example:
+Set `Host IP / name` to the host machine and keep `STT/TTS port` at `8766`, for example:
 
 ```text
-http://100.x.y.z
+100.x.y.z
 ```
 
-The app adds port `8766` when no port is provided. With `-NoLocalSpeechFallback`, the client will not try `127.0.0.1:8766` if the host is unreachable.
+The app builds the speech URL from the host and STT/TTS port. With `-NoLocalSpeechFallback`, the client will not try `127.0.0.1:8766` if the host is unreachable.
 
-If no remote host is configured and local fallback is disabled, voice input and voice replies fail with a setup error instead of trying to download local speech models.
+If no speech host is configured or reachable, BaseClaw can still start text-only. Voice input and voice replies remain unavailable until STT/TTS is configured.
 
 ## Manual Config
 

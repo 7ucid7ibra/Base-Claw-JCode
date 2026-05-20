@@ -9,7 +9,8 @@ This project is ready to share as an alpha learning foundation after the local-s
 - Publish from a clean repository rooted at the BaseClaw project folder. Do not publish from a parent user-profile repository.
 - Review `git status --short` and make sure only project files are present.
 - Remove generated files before release: logs, SQLite databases, voice test WAVs, screenshots, caches, virtual environments, and downloaded model folders.
-- Run `python app/verify_install.py`.
+- Run `bash -n install.sh`.
+- Run `python -m py_compile app/telegram_operator_ui.py app/telegram_codex_operator.py app/kokoro_server.py`.
 - Start Kokoro and confirm `GET /health`, `GET /voices`, and a real `POST /synthesize`.
 - Confirm `POST /synthesize_voice_note` if you want lightweight clients to avoid local ffmpeg.
 - Start the Telegram operator in `restricted` or `safe` mode first.
@@ -18,10 +19,9 @@ This project is ready to share as an alpha learning foundation after the local-s
 
 This is a local high-trust agent bridge, not a hardened multi-user service.
 
-- `restricted` sends a Telegram approval card before each task. Proposal generation is read-only; approved execution uses Codex workspace-write sandboxing.
-- `safe` uses Codex workspace-write sandboxing and treats the configured workspace as the normal operating area.
-- `code` uses Codex workspace-write sandboxing from the app repository root and auto-commits pre-run checkpoints plus agent changes so code edits can be reverted.
-- `full` bypasses Codex approvals and sandboxing. Use it only for a private bot and a trusted chat id.
+- Access scope controls whether the agent may work only in the workspace, in the workspace plus this app code, or across the full machine.
+- Action mode controls whether work is read-only, approval-gated, or executed directly.
+- Codex has the strongest native sandbox support. Other harnesses receive policy instructions and process-level limits, but not the same sandbox guarantees.
 
 Anyone who can use the allowed Telegram chat can ask the local agent to perform actions with the configured safety level.
 
@@ -45,5 +45,7 @@ Do not include:
 - `*.sqlite3`
 - `telegram_operator_state.json`
 - `telegram_operator_memory.jsonl`
+- `telegram_operator_board_ed25519`
+- `telegram_operator_board_known_hosts`
 - local voice/model/cache folders
 - generated screenshots or audio test files

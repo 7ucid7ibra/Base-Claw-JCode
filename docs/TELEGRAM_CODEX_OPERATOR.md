@@ -1,146 +1,160 @@
 # BaseClaw Telegram Operator
 
-BaseClaw turns a Telegram bot into a local coding-agent operator on this machine.
+BaseClaw turns a Telegram bot into a local coding-agent bridge on one trusted machine. It also provides a small desktop UI with a live chat window, settings, speech controls, and runtime controls.
 
 It supports:
 
-- Telegram text messages
-- Telegram voice notes
-- Whisper transcription for incoming voice
-- Codex CLI execution with persisted session resume
-- Safe mode approval cards with Telegram inline Approve/Cancel buttons
-- Kokoro voice replies
-- A small local settings UI
-- Per-chat persistent session mapping
-- Local memory log of requests and replies
-- SQLite message journal with message metadata
+- Telegram text messages and voice notes.
+- Desktop chat messages in the local UI.
+- Whisper transcription for incoming voice.
+- Kokoro voice replies.
+- JCode with local or hosted model providers.
+- Direct Codex CLI and Claude CLI modes.
+- Safety and access controls for local filesystem work.
+- Per-chat session state, local message logs, and optional shared history sync.
 
-## Important
+## Trust Model
 
-This operator is intentionally high trust. It is useful as a private local-agent bridge, but it is not a hardened multi-user service.
+This is a high-trust local tool, not a hardened multi-user service.
 
-- In `restricted` mode, every normal task gets a Telegram approval card first.
-- In `safe` mode, Codex uses workspace-write sandboxing.
-- In `code` mode, Codex can edit this app repository with workspace-write sandboxing and automatic git commits.
-- In `full` mode, Codex uses `--dangerously-bypass-approvals-and-sandbox`.
-- Codex runs with the same local permissions as this user account.
-- It should only be allowed for your own Telegram chat id.
-- Anyone who can send commands through the allowed chat can cause local actions on this machine.
-- With restricted mode enabled, normal Telegram requests first produce a read-only Codex proposal card. The real agent request is not executed until you tap `Approve`.
-- The sandbox and approval card are practical guardrails, not a complete security boundary.
+- Only allow your own Telegram chat id.
+- Anyone who can use the allowed Telegram chat can send work to the configured local agent.
+- `read` action mode is for inspection only.
+- `approve` action mode asks for confirmation before write-oriented work.
+- `full` action mode lets the selected harness execute immediately.
+- Codex has the strongest native sandbox support. Other harnesses receive policy instructions and process-level limits, but not the same sandbox guarantees.
 
 ## Files
 
 - `app/telegram_codex_operator.py`
 - `app/telegram_operator_ui.py`
-- `scripts/start_telegram_operator_ui.ps1`
 - `requirements/telegram-operator.txt`
 - `.env.telegram-operator.example`
 
-## Environment
+## Basic Environment
 
-Copy `.env.telegram-operator.example` to `.env.telegram-operator` or set the variables in your shell.
-
-Keep `.env.telegram-operator` local only. It is ignored by git and should never be published. If a real bot token was ever committed or shared, rotate it before making the project public.
+Copy `.env.telegram-operator.example` to `.env.telegram-operator`, or let `./install.sh` create it for you.
 
 Required:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_ALLOWED_CHAT_IDS`
 
-The operator script prefers the dedicated file:
-
-- `.env.telegram-operator`
-
-This avoids accidentally picking up credentials from a different Telegram bot config.
-
-Recommended defaults:
+Important local defaults:
 
 - `TELEGRAM_OPERATOR_WORKDIR=agent_workspace`
-- `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL=` can be left empty for local speech, or set to one external Kokoro/Whisper host.
-- `TELEGRAM_OPERATOR_KOKORO_VOICE=af_alloy`
-- `TELEGRAM_OPERATOR_WHISPER_MODEL=base`
-- `TELEGRAM_OPERATOR_PROVIDER=codex`
+- `TELEGRAM_OPERATOR_RUN_MODE=local`
+- `TELEGRAM_OPERATOR_PROVIDER=jcode`
+- `TELEGRAM_OPERATOR_MODEL_PROVIDER=lmstudio`
+- `TELEGRAM_OPERATOR_REMOTE_HOST=127.0.0.1`
+- `TELEGRAM_OPERATOR_SPEECH_PORT=8766`
+- `TELEGRAM_OPERATOR_LLM_PORT=1234`
 
-Codex settings:
+Never publish `.env.telegram-operator`. It contains local credentials and machine-specific settings.
 
-- `TELEGRAM_OPERATOR_PROVIDER=codex` uses the native Codex bridge and persisted Codex session ids. The UI is intentionally Codex-only for now.
-- `TELEGRAM_OPERATOR_CODEX_MODEL` can be empty for the Codex CLI default, or set from the UI dropdown.
-- `TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS=900` limits each agent run so a stuck CLI cannot block Telegram forever.
-- `TELEGRAM_OPERATOR_SAFETY_MODE=safe` selects the Codex safety level.
-- `TELEGRAM_OPERATOR_SAFE_MODE` is a legacy compatibility flag. The UI now writes `TELEGRAM_OPERATOR_SAFETY_MODE`.
-- `TELEGRAM_OPERATOR_SQLITE_PATH=telegram_operator_messages.sqlite3` stores incoming messages, outgoing replies, callbacks, transcripts, and agent-turn metadata in SQLite. The UI does not expose this path; it is fixed to the app folder by default.
-- `/history_status` reports local raw-message rows that are eligible for shared history sync, how many have synced, and whether the Raspberry Pi sync target is configured.
-- `/history_sync` manually copies unsynced local raw message rows to the configured Raspberry Pi SQLite history database. Sync is append-only and duplicate-safe by `agent:device:local_id` source keys.
-- Board polling:
-  - `TELEGRAM_OPERATOR_BOARD_POLL_ENABLED=true` enables low-frequency checks of the Raspberry Pi board.
-  - `TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS=180` controls the polling interval.
-  - `TELEGRAM_OPERATOR_BOARD_REMOTE` defaults to `TELEGRAM_OPERATOR_HISTORY_REMOTE` when empty.
-  - `TELEGRAM_OPERATOR_BOARD_PATH=/home/ai/agent_board/entries.ndjson` is the board file to read.
-  - `TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES=baseclaw,maat-supervisor,developer-agent` controls which `to` values are relevant for this supervisor.
-  - The poller only sends Telegram notices. It does not run implementation tasks automatically.
-- History sync configuration:
-  - `TELEGRAM_OPERATOR_HISTORY_AGENT=baseclaw`
-  - `TELEGRAM_OPERATOR_HISTORY_DEVICE=<device-name>`
-  - `TELEGRAM_OPERATOR_HISTORY_REMOTE=ai@100.108.172.7`
-  - `TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH=/media/ai/7A31-E9C8/agent_history/shared_history.sqlite3`
-  - `TELEGRAM_OPERATOR_HISTORY_SSH_KEY=<private-key-path>`
-  - `TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS=<known-hosts-path>`
-  - `TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT=250`
-- `TELEGRAM_OPERATOR_REMOTE_SPEECH_URL` is the single optional remote host for both Kokoro TTS and Whisper transcription. If it is empty or unreachable, the bridge falls back to local speech candidates.
-- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK=true` controls whether the client tries local speech candidates when the remote host is empty or unavailable. Local candidates include `http://127.0.0.1:8766` and the device's Tailscale `100.x.x.x:8766` address when `tailscale ip -4` is available.
-- `/voice` opens a Telegram inline keyboard with voices discovered from the active Kokoro host. Selecting a voice updates the running operator immediately and persists `TELEGRAM_OPERATOR_KOKORO_VOICE` plus the inferred language code to `.env.telegram-operator`.
-- `TELEGRAM_OPERATOR_STARTUP_NOTICE=true` sends a short Telegram text notice to the allowed chat ids after the operator starts.
-- The remote speech host can be entered as a bare IP or hostname. The app adds `http://` and port `8766` automatically when they are omitted.
-- If no workspace is selected, the app uses `agent_workspace` in this folder. Its default map is `agent/skills`, `agent/memory`, `agent/senses`, `work/prototypes`, `work/projects`, and `work/routines`.
+## Provider Modes
 
-Codex must be installed, available on `PATH`, and authenticated before the operator can run. On a fresh machine, open a normal terminal and run `codex login` before starting the UI. The UI checks for the CLI at startup and the operator returns a clear error if Codex is missing or appears unauthenticated.
+BaseClaw separates the visible mode from the underlying model provider.
 
-On Windows, the app prefers `codex.cmd`, then `codex.exe`, and only falls back to `codex.ps1` through PowerShell. This avoids launching a bare npm shim as if it were a native executable.
+Local mode:
 
-## Install
+- Uses JCode as the coding harness.
+- Can connect to LM Studio, Ollama, OpenRouter, OpenAI-compatible endpoints, and other JCode-supported providers.
+- For LM Studio, start the LM Studio server and load a model first.
+- For Ollama, start Ollama and make sure the selected model is available.
+- For hosted JCode providers, add the relevant API key in the UI.
 
-Create the dedicated environment:
+Cloud mode:
 
-```powershell
-py -3.11 -m venv .venv-telegram-agent
-.\.venv-telegram-agent\Scripts\Activate.ps1
-python -m pip install -r requirements\telegram-operator.txt
-```
+- Uses direct Codex CLI or Claude CLI.
+- Codex requires `codex login`.
+- Claude requires the Claude CLI to be installed and authenticated.
 
-For a lightweight host-only client, use:
+Key settings:
 
-```powershell
-.\install.ps1 -Mode client -NoLocalSpeechFallback
-```
+- `TELEGRAM_OPERATOR_PROVIDER`: selected harness, normally `jcode`, `codex`, or `claude`.
+- `TELEGRAM_OPERATOR_MODEL_PROVIDER`: JCode provider, for example `lmstudio`, `ollama`, or `openrouter`.
+- `TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE`: optional advanced JCode profile. Leave it empty for the normal UI flow.
+- `TELEGRAM_OPERATOR_JCODE_API_KEY`: optional key for hosted JCode providers.
+- `TELEGRAM_OPERATOR_CODEX_MODEL`: model name passed to the selected harness when supported.
+- `TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED`: optional rolling continuity summary and recent chat context injection across Telegram, desktop, and harness switches.
+
+The desktop UI supports named agent profiles. The `main` profile uses the root `.env.telegram-operator` and root runtime files for backward compatibility. Additional profiles live under `profiles/<name>/` and have their own env file, workspace, SQLite message history, session state, memory log, and operator log. Starting a profile launches a separate operator process, so different Telegram bot tokens can run simultaneously from the same install. Deleting a non-main profile stops that profile and removes its local profile folder.
+
+For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse incompatible session ids. If shared context injection is enabled, BaseClaw also adds a rolling continuity summary plus a compact recent chat-history block to each prompt; old messages are explicitly marked as context, not new instructions.
+
+## Safety And Access
+
+Access scope controls where the agent is allowed to work:
+
+- `workspace`: the selected workspace and explicitly added paths.
+- `code`: the workspace plus this app repository.
+- `full`: no path restriction from BaseClaw.
+
+When the install is a git checkout, `code` mode creates automatic git checkpoints before and after write-capable agent runs. Archive installs without a `.git` folder skip those checkpoints instead of blocking the request.
+
+Action mode controls how quickly it may act:
+
+- `read`: read-only intent.
+- `approve`: ask for confirmation before write-oriented actions.
+- `full`: execute without extra confirmation.
+
+Legacy `TELEGRAM_OPERATOR_SAFETY_MODE` and `TELEGRAM_OPERATOR_SAFE_MODE` are kept for compatibility, but new UI controls use access scope plus action mode.
+
+## Speech
+
+Kokoro and Whisper can run locally or on a separate reachable host.
+
+- `TELEGRAM_OPERATOR_REMOTE_HOST` is the shared host for speech and local model services.
+- `TELEGRAM_OPERATOR_SPEECH_PORT` is the STT/TTS service port for Whisper transcription and Kokoro voice output.
+- `TELEGRAM_OPERATOR_LLM_PORT` is managed automatically for LM Studio and Ollama. LM Studio uses `1234`; Ollama uses `11434`.
+- `TELEGRAM_OPERATOR_LOCAL_SPEECH_FALLBACK` is an advanced compatibility flag kept for old env files. Normal installs try the configured speech host plus local speech candidates automatically.
+
+The UI can discover voices from the active Kokoro host. Selecting a voice persists the voice and inferred language code.
+
+## Optional Shared History And Board
+
+The operator can keep local raw chat history and optionally sync it to a shared SQLite database over SSH. This is useful when several trusted machines should coordinate, but it is disabled by default.
+
+Relevant settings:
+
+- `TELEGRAM_OPERATOR_HISTORY_AGENT`
+- `TELEGRAM_OPERATOR_HISTORY_DEVICE`
+- `TELEGRAM_OPERATOR_HISTORY_REMOTE`
+- `TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH`
+- `TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED`
+
+The optional shared board poller can watch a remote newline-delimited JSON file for coordination notices. It only sends Telegram notices; it does not run implementation tasks automatically.
+
+Relevant settings:
+
+- `TELEGRAM_OPERATOR_BOARD_POLL_ENABLED`
+- `TELEGRAM_OPERATOR_BOARD_REMOTE`
+- `TELEGRAM_OPERATOR_BOARD_PATH`
+- `TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES`
+
+Leave these settings empty for a normal single-machine install.
 
 ## Run
 
-Make sure the Kokoro server is running first on `127.0.0.1:8766`.
+Install and open the UI:
 
-To open the local settings window:
-
-```powershell
-.\start-ui.ps1
+```bash
+./install.sh
 ```
 
-Then start the operator:
+Start the UI later:
 
-```powershell
-.\.venv-telegram-agent\Scripts\Activate.ps1
-python app\telegram_codex_operator.py
+```bash
+source .venv-telegram-agent/bin/activate
+python app/telegram_operator_ui.py
 ```
 
-For a simple restart loop:
+Run only the Telegram operator:
 
-```powershell
-.\run-operator.ps1
-```
-
-For a quick local check:
-
-```powershell
-.\.venv-telegram-agent\Scripts\python.exe app\verify_install.py
+```bash
+source .venv-telegram-agent/bin/activate
+python app/telegram_codex_operator.py
 ```
 
 ## Telegram Commands
@@ -148,59 +162,23 @@ For a quick local check:
 - `/start`
 - `/status`
 - `/reset`
+- `/voice`
+- `/history_status`
+- `/history_sync`
 
-Text and voice requests run through one resumed Codex session per Telegram chat. The operator keeps the Telegram typing or recording indicator active until the final reply has been sent. While Codex is running, the bridge sends small status updates every couple of minutes based on streamed Codex events, such as command execution, SSH work, or final reply preparation.
-
-When restricted mode is enabled, regular text and voice-note requests produce a proposal card with:
-
-- the expected actions
-- workspace boundary notes
-- risks
-- `Approve` and `Cancel` buttons
-
-Approving the card runs the original request. Cancelling discards it. Approved requests include the proposal text in the final agent prompt and instruct the agent to stay inside `TELEGRAM_OPERATOR_WORKDIR` unless the approved proposal explicitly covers outside paths.
-
-Safety modes:
-
-- `restricted`: sends a Telegram approval card before each task. The proposal step is read-only and ephemeral; approved execution uses Codex `workspace-write` sandboxing.
-- `safe`: runs Codex with `workspace-write` sandboxing. Reading and writing inside the workspace are permitted. Outside-workspace work should be requested explicitly and may be blocked by the sandbox.
-- `code`: runs Codex with `workspace-write` sandboxing from the app repository root so it can edit its own code. The bridge commits any existing repo changes before the run as a checkpoint, then commits agent changes after the run for easy revert.
-- `full`: runs Codex with `--dangerously-bypass-approvals-and-sandbox`.
+Text and voice requests are routed to the selected harness. The bridge keeps Telegram typing or recording indicators active until the final reply is delivered, and sends compact progress updates during longer runs.
 
 ## Persistence
 
-Session ids are stored in:
+Local runtime state is intentionally ignored by git:
 
 - `telegram_operator_state.json`
-
-Message and reply logs are stored in:
-
 - `telegram_operator_memory.jsonl`
-
-Full message metadata is stored in SQLite:
-
 - `telegram_operator_messages.sqlite3`
+- `telegram_operator_board_state.json`
 
-The database table is `telegram_messages`. It records the direction, event type, chat id, Telegram message id, Telegram user metadata, message type, text, transcript, session id, safe mode state, approval id, and a JSON metadata column for raw Telegram details.
+The SQLite database records message metadata, transcripts, callbacks, outgoing replies, and completed agent-turn metadata.
 
-Quick inspection:
+## Publishing Reminder
 
-```powershell
-sqlite3 .\telegram_operator_messages.sqlite3 "select id, recorded_at, direction, event_type, message_type from telegram_messages order by id desc limit 20;"
-```
-
-Codex also persists its own session data under the normal local Codex home.
-
-## Behavior
-
-- Text messages are sent into Codex.
-- Voice notes are downloaded, transcribed with Whisper, then sent into Codex.
-- Replies are sent back as a Kokoro voice note with the text as its caption when it fits.
-- The Kokoro server also exposes `POST /transcribe`, so Whisper can run on the same host as Kokoro. The UI shows one remote speech host field for both.
-- Modern speech hosts also expose `POST /synthesize_voice_note`, so lightweight clients do not need local ffmpeg for normal Telegram voice replies.
-- If voice transcription fails before Codex receives the request, the bot sends a Telegram error message instead of silently stopping the recording indicator.
-- Codex keeps one resumed conversation per Telegram chat id.
-- Safe mode proposal generation uses Codex in read-only, ephemeral mode so proposal creation does not intentionally modify files or reuse the active coding session.
-- For voice-note requests, the Telegram `recording voice note` indicator is kept alive until the reply delivery finishes.
-- Agent turns send compact status updates every couple of minutes while Codex is still running.
-- If an agent exceeds the configured timeout, the bridge returns an operator error and unlocks the chat for the next request.
+Before publishing a copy, remove local runtime files and rotate any Telegram bot token that was ever stored in the project. See `docs/PUBLISHING.md`.
