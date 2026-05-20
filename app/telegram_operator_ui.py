@@ -32,7 +32,7 @@ ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
-UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw-JCode"
+UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]

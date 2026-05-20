@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 CONFIG_PATH=".baseclaw-install.conf"
-PUBLIC_REPO_URL="https://github.com/7ucid7ibra/Base-Claw-JCode"
+PUBLIC_REPO_URL="https://github.com/7ucid7ibra/Base-Claw"
 YES=0
 LAUNCH=1
 WITH_KOKORO=""
