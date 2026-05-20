@@ -3141,6 +3141,14 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         *,
         always_send_text: bool = False,
     ) -> None:
+        text, file_paths = self._extract_file_send_directives(text)
+        if file_paths:
+            if text.strip():
+                await self._send_text_chunks(context, chat_id, text.strip())
+            for file_path in file_paths:
+                await self._send_output_document(context, chat_id, file_path)
+            return
+
         if not self.config.voice_replies_enabled:
             await self._send_text_chunks(context, chat_id, text)
             return
@@ -3158,6 +3166,77 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         else:
             if always_send_text or len(text) > 900:
                 await self._send_text_chunks(context, chat_id, text)
+
+    def _extract_file_send_directives(self, text: str) -> tuple[str, list[Path]]:
+        file_paths: list[Path] = []
+        kept_lines: list[str] = []
+        pattern = re.compile(r"^\s*BASECLAW_SEND_(?:FILE|DOCUMENT):\s*(.+?)\s*$", re.IGNORECASE)
+        for line in text.splitlines():
+            match = pattern.match(line)
+            if match:
+                raw_path = match.group(1).strip().strip("\"'")
+                if raw_path:
+                    file_paths.append(Path(raw_path).expanduser())
+                continue
+            kept_lines.append(line)
+        return "\n".join(kept_lines).strip(), file_paths
+
+    def _allowed_output_roots(self) -> list[Path]:
+        roots = [self.config.workdir, *self.config.allowed_paths]
+        if self.config.access_scope in {"code", "full"}:
+            roots.append(PROJECT_ROOT)
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                key = str(root.resolve())
+            except OSError:
+                continue
+            if key not in seen:
+                unique.append(root.resolve())
+                seen.add(key)
+        return unique
+
+    def _validate_output_document_path(self, path: Path) -> Path:
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise RuntimeError(f"Requested output file does not exist or is not a file: {path}")
+        roots = self._allowed_output_roots()
+        allowed = False
+        for root in roots:
+            try:
+                if os.path.commonpath([str(root), str(resolved)]) == str(root):
+                    allowed = True
+                    break
+            except ValueError:
+                continue
+        if not allowed:
+            raise RuntimeError("Requested output file is outside the current profile workspace and allowed paths.")
+        return resolved
+
+    async def _send_output_document(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: Path) -> None:
+        document_path = self._validate_output_document_path(path)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        except Exception as exc:
+            LOGGER.warning("Telegram chat action failed before document upload chat_id=%s error=%s", chat_id, exc)
+        with document_path.open("rb") as handle:
+            sent = await context.bot.send_document(chat_id=chat_id, document=handle, filename=document_path.name)
+        self.message_store.append(
+            direction="out",
+            event_type="outgoing_document_reply",
+            chat_id=chat_id,
+            telegram_message_id=sent.message_id,
+            message_type="document",
+            text=str(document_path),
+            safe_mode=self.config.safe_mode,
+            metadata={
+                "path": str(document_path),
+                "filename": document_path.name,
+                "profile_env": str(OPERATOR_ENV_PATH),
+                "send_guardrail": "current_profile_bot_current_chat",
+            },
+        )
 
     async def _send_text_chunks(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         chunk_size = 3500
@@ -3194,6 +3273,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             "Do not create approval loops for small next steps unless there is real risk, missing access, or destructive impact.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             "Voice-friendly reply rule: prefer plain conversational text. Avoid decorative Markdown such as bold/italic markers unless necessary. Do not quote long file paths, long numbers, long commands, logs, or code blocks in normal spoken replies; summarize them and include only short labels or essential names. If exact paths, commands, or code are needed, put them after a short spoken summary and keep them minimal.",
+            "Telegram send guardrail: never call Telegram Bot API methods, curl, requests, bot tokens, or external Telegram scripts yourself to send messages or files. Do not read or use TELEGRAM_BOT_TOKEN values for sending. To send a file to the user, create it under the current profile workspace or an allowed path and include a final line exactly like `BASECLAW_SEND_FILE: /absolute/path/to/file`. The bridge will upload that file through this profile's own bot token to this same chat.",
             f"Telegram sender: {telegram_user}",
             "Loaded supervisor identity:",
             self._identity_prompt_block(),
