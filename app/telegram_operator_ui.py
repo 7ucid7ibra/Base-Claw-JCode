@@ -2874,16 +2874,9 @@ class OperatorUi(ctk.CTk):
 
     def _pull_archive_update(self, source: str) -> tuple[bool, str]:
         try:
+            backup_detail = ""
             if (PROJECT_ROOT / ".git").exists():
-                dirty = subprocess.run(
-                    ["git", "status", "--short"],
-                    cwd=str(PROJECT_ROOT),
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                )
-                if dirty.returncode == 0 and dirty.stdout.strip():
-                    return False, "Update blocked because the local git worktree has uncommitted changes."
+                backup_detail = self._backup_git_update_state()
 
             with tempfile.TemporaryDirectory(prefix="baseclaw-update-") as tmp:
                 tmp_path = Path(tmp)
@@ -2895,9 +2888,40 @@ class OperatorUi(ctk.CTk):
                 roots = [item for item in extract_dir.iterdir() if item.is_dir()]
                 source_root = roots[0] if len(roots) == 1 else extract_dir
                 copied = self._overlay_update(source_root)
-                return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code."
+                suffix = f" Local git changes were backed up in {backup_detail}." if backup_detail else ""
+                return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code.{suffix}"
         except Exception as exc:
             return False, str(exc)
+
+    def _backup_git_update_state(self) -> str:
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        if status.returncode != 0 or not status.stdout.strip():
+            return ""
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        backup_dir = PROJECT_ROOT / ".local-update-backups" / f"runtime-update-{stamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        (backup_dir / "git-status.txt").write_text(status.stdout, encoding="utf-8")
+        for name, args in {
+            "git-diff.patch": ["git", "diff", "--binary"],
+            "git-diff-staged.patch": ["git", "diff", "--cached", "--binary"],
+        }.items():
+            result = subprocess.run(
+                args,
+                cwd=str(PROJECT_ROOT),
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and result.stdout:
+                (backup_dir / name).write_text(result.stdout, encoding="utf-8")
+        return str(backup_dir.relative_to(PROJECT_ROOT))
 
     def _resolve_update_archive(self, source: str, tmp_path: Path) -> tuple[Path, str]:
         github_repo = self._github_repo_from_source(source)
@@ -3014,10 +3038,13 @@ class OperatorUi(ctk.CTk):
         excluded = {
             ".env.telegram-operator",
             ".git",
+            ".local-update-backups",
             ".venv-kokoro",
             ".venv-telegram-agent",
+            ".baseclaw-install.conf",
             "agent_workspace",
             "profiles",
+            "telegram_uploads",
             "telegram_codex_operator.log",
             "telegram_operator_messages.sqlite3",
             "telegram_operator_memory.jsonl",
