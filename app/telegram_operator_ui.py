@@ -822,6 +822,10 @@ class OperatorUi(ctk.CTk):
         self.start_button: ctk.CTkButton | None = None
         self.stop_button: ctk.CTkButton | None = None
         self.restart_button: ctk.CTkButton | None = None
+        self.send_button: ctk.CTkButton | None = None
+        self.thinking_label: ctk.CTkLabel | None = None
+        self.thinking_after_id: str | None = None
+        self.thinking_step = 0
         self.log_box: ctk.CTkTextbox | None = None
         self.chat_scroll: ctk.CTkScrollableFrame | None = None
         self.chat_input: ctk.CTkTextbox | None = None
@@ -868,6 +872,9 @@ class OperatorUi(ctk.CTk):
             self.profile_combo.configure(values=list_profiles())
 
     def create_profile(self) -> None:
+        if self.chat_busy:
+            messagebox.showinfo("Agent busy", "Wait for the current desktop chat turn to finish before changing profiles.")
+            return
         name = simpledialog.askstring("New agent profile", "Profile name:", parent=self)
         if not name:
             return
@@ -895,7 +902,43 @@ class OperatorUi(ctk.CTk):
         self.profile_var.set(profile)
         self.on_profile_selected(profile)
 
+    def delete_profile(self) -> None:
+        if self.chat_busy:
+            messagebox.showinfo("Agent busy", "Wait for the current desktop chat turn to finish before deleting a profile.")
+            return
+        profile = self.profile_name
+        if profile == MAIN_PROFILE:
+            messagebox.showinfo("Delete profile", "The main profile cannot be deleted.")
+            return
+        target = profile_dir(profile)
+        if not target.exists():
+            self.profile_name = MAIN_PROFILE
+            self.profile_var.set(MAIN_PROFILE)
+            self._refresh_profile_combo()
+            self._load_values_into_vars()
+            return
+        if not messagebox.askyesno(
+            "Delete profile",
+            f"Delete profile '{profile}'?\n\nThis stops its operator and removes its local config, chat history, session state, workspace, and logs.",
+        ):
+            return
+        self._kill_operator_processes(show_errors=False)
+        shutil.rmtree(target)
+        self.profile_name = MAIN_PROFILE
+        self.profile_var.set(MAIN_PROFILE)
+        self._refresh_profile_combo()
+        self.values = self._profile_values(MAIN_PROFILE)
+        self._load_values_into_vars()
+        self.last_chat_row_id = -1
+        self.refresh_status()
+        self.refresh_chat_history()
+        self.set_status("Profile deleted", f"Deleted profile: {profile}", None)
+
     def on_profile_selected(self, value: str | None = None) -> None:
+        if self.chat_busy:
+            self.profile_var.set(self.profile_name)
+            messagebox.showinfo("Agent busy", "Wait for the current desktop chat turn to finish before switching profiles.")
+            return
         profile = safe_profile_name(value or self.profile_var.get() or MAIN_PROFILE)
         if profile == self.profile_name:
             return
@@ -981,6 +1024,17 @@ class OperatorUi(ctk.CTk):
             corner_radius=12,
             command=self.create_profile,
         ).grid(row=0, column=2, sticky="e")
+        ctk.CTkButton(
+            profile_bar,
+            text="Delete",
+            width=84,
+            height=34,
+            corner_radius=12,
+            fg_color=COLORS["panel_lift"],
+            hover_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self.delete_profile,
+        ).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 16))
@@ -1277,9 +1331,19 @@ class OperatorUi(ctk.CTk):
         chat.grid_columnconfigure(0, weight=1)
         chat.grid_rowconfigure(1, weight=1)
 
-        ctk.CTkLabel(chat, text="Conversation", font=ctk.CTkFont(size=19, weight="bold"), text_color=COLORS["text"]).grid(
-            row=0, column=0, sticky="w", padx=20, pady=(18, 8)
+        chat_header = ctk.CTkFrame(chat, fg_color="transparent")
+        chat_header.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
+        chat_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(chat_header, text="Conversation", font=ctk.CTkFont(size=19, weight="bold"), text_color=COLORS["text"]).grid(
+            row=0, column=0, sticky="w"
         )
+        self.thinking_label = ctk.CTkLabel(
+            chat_header,
+            text="",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.thinking_label.grid(row=0, column=1, sticky="e")
         self.chat_scroll = ctk.CTkScrollableFrame(
             chat,
             corner_radius=12,
@@ -1304,7 +1368,7 @@ class OperatorUi(ctk.CTk):
             wrap="word",
         )
         self.chat_input.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ctk.CTkButton(
+        self.send_button = ctk.CTkButton(
             composer,
             text="Send",
             width=96,
@@ -1314,7 +1378,8 @@ class OperatorUi(ctk.CTk):
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["accent_text"],
             command=self.send_desktop_chat,
-        ).grid(row=0, column=1, sticky="e")
+        )
+        self.send_button.grid(row=0, column=1, sticky="e")
 
     def open_settings(self) -> None:
         if not self.settings_frame or not self.chat_card:
@@ -2370,6 +2435,36 @@ class OperatorUi(ctk.CTk):
                 data["provider_sessions"].setdefault(str(chat_id), {})[provider] = session_id
             state_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
+    def _start_thinking_indicator(self) -> None:
+        self.thinking_step = 0
+        if self.send_button:
+            self.send_button.configure(state="disabled", text="Working")
+        self._animate_thinking_indicator()
+
+    def _animate_thinking_indicator(self) -> None:
+        if not self.chat_busy:
+            self._stop_thinking_indicator()
+            return
+        dots = "." * ((self.thinking_step % 3) + 1)
+        if self.thinking_label:
+            self.thinking_label.configure(text=f"Assistant thinking{dots}")
+        self.thinking_step += 1
+        self.thinking_after_id = self.after(450, self._animate_thinking_indicator)
+
+    def _stop_thinking_indicator(self) -> None:
+        if self.thinking_after_id:
+            self.after_cancel(self.thinking_after_id)
+            self.thinking_after_id = None
+        if self.thinking_label:
+            self.thinking_label.configure(text="")
+        if self.send_button:
+            self.send_button.configure(state="normal", text="Send")
+
+    def _finish_desktop_agent_turn(self) -> None:
+        self.chat_busy = False
+        self._stop_thinking_indicator()
+        self.refresh_chat_history()
+
     def send_desktop_chat(self) -> None:
         if self.chat_busy or not self.chat_input:
             return
@@ -2379,6 +2474,7 @@ class OperatorUi(ctk.CTk):
         values = self.current_values()
         self.chat_input.delete("1.0", "end")
         self.chat_busy = True
+        self._start_thinking_indicator()
         self._append_desktop_history(direction="in", event_type="desktop_user_message", text=text, values=values)
         self.refresh_chat_history()
         threading.Thread(target=self._run_desktop_agent_turn, args=(text, values), daemon=True).start()
@@ -2430,8 +2526,7 @@ class OperatorUi(ctk.CTk):
         except Exception as exc:
             self._append_desktop_history(direction="out", event_type="desktop_agent_reply", text=f"Desktop chat error: {exc}", values=values)
         finally:
-            self.chat_busy = False
-            self.after(0, self.refresh_chat_history)
+            self.after(0, self._finish_desktop_agent_turn)
 
     def _desktop_agent_command(
         self,
