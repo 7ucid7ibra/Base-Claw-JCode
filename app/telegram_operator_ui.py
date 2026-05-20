@@ -15,7 +15,7 @@ import tkinter as tk
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import urlopen
@@ -29,6 +29,8 @@ PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
 DEFAULT_WORKSPACE = PROJECT_ROOT / "agent_workspace"
 ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
+PROFILES_DIR = PROJECT_ROOT / "profiles"
+MAIN_PROFILE = "main"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
@@ -47,6 +49,7 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_STATE_PATH",
     "TELEGRAM_OPERATOR_MEMORY_LOG",
     "TELEGRAM_OPERATOR_SQLITE_PATH",
+    "TELEGRAM_OPERATOR_LOG_PATH",
     "TELEGRAM_OPERATOR_REMOTE_HOST",
     "TELEGRAM_OPERATOR_SPEECH_PORT",
     "TELEGRAM_OPERATOR_LLM_PORT",
@@ -109,6 +112,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_STATE_PATH": str(BASE_DIR / "telegram_operator_state.json"),
     "TELEGRAM_OPERATOR_MEMORY_LOG": str(BASE_DIR / "telegram_operator_memory.jsonl"),
     "TELEGRAM_OPERATOR_SQLITE_PATH": str(BASE_DIR / "telegram_operator_messages.sqlite3"),
+    "TELEGRAM_OPERATOR_LOG_PATH": str(BASE_DIR / "telegram_codex_operator.log"),
     "TELEGRAM_OPERATOR_REMOTE_HOST": "127.0.0.1",
     "TELEGRAM_OPERATOR_SPEECH_PORT": "8766",
     "TELEGRAM_OPERATOR_LLM_PORT": "1234",
@@ -646,8 +650,63 @@ def default_llm_port(model_provider: str) -> str:
     return DEFAULT_LLM_PORTS.get(model_provider_value(model_provider), "1234")
 
 
-def operator_processes() -> list[dict]:
+def safe_profile_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", name.strip()).strip(".-")
+    return cleaned[:48] or "agent"
+
+
+def profile_dir(profile: str) -> Path:
+    return PROFILES_DIR / safe_profile_name(profile)
+
+
+def profile_env_path(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return ENV_PATH
+    return profile_dir(profile) / ".env.telegram-operator"
+
+
+def profile_log_path(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return LOG_PATH
+    return profile_dir(profile) / "telegram_codex_operator.log"
+
+
+def profile_state_path(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return BASE_DIR / "telegram_operator_state.json"
+    return profile_dir(profile) / "telegram_operator_state.json"
+
+
+def profile_memory_log_path(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return BASE_DIR / "telegram_operator_memory.jsonl"
+    return profile_dir(profile) / "telegram_operator_memory.jsonl"
+
+
+def profile_sqlite_path(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return BASE_DIR / "telegram_operator_messages.sqlite3"
+    return profile_dir(profile) / "telegram_operator_messages.sqlite3"
+
+
+def profile_workdir(profile: str) -> Path:
+    if profile == MAIN_PROFILE:
+        return DEFAULT_WORKSPACE
+    return profile_dir(profile) / "agent_workspace"
+
+
+def list_profiles() -> list[str]:
+    profiles = [MAIN_PROFILE]
+    if PROFILES_DIR.exists():
+        for item in sorted(PROFILES_DIR.iterdir()):
+            if item.is_dir() and (item / ".env.telegram-operator").exists():
+                profiles.append(item.name)
+    return profiles
+
+
+def operator_processes(profile_env: Path | None = None) -> list[dict]:
     processes = []
+    profile_env_text = str(profile_env) if profile_env else ""
     for process in psutil.process_iter(["pid", "ppid", "name", "exe", "cmdline"]):
         try:
             cmdline = " ".join(process.info.get("cmdline") or [])
@@ -657,6 +716,10 @@ def operator_processes() -> list[dict]:
         # "python" or "Python", so detect the operator/supervisor by script argument.
         if OPERATOR_SCRIPT.name not in cmdline and SUPERVISOR_SCRIPT.name not in cmdline:
             continue
+        if profile_env_text and profile_env_text not in cmdline:
+            is_legacy_main = profile_env == ENV_PATH and "--profile-env" not in cmdline and "-ProfileEnv" not in cmdline
+            if not is_legacy_main:
+                continue
         processes.append(
             {
                 "ProcessId": process.info["pid"],
@@ -669,8 +732,8 @@ def operator_processes() -> list[dict]:
     return processes
 
 
-def root_operator_processes() -> list[dict]:
-    processes = operator_processes()
+def root_operator_processes(profile_env: Path | None = None) -> list[dict]:
+    processes = operator_processes(profile_env)
     operator_ids = {int(item["ProcessId"]) for item in processes}
     roots = [item for item in processes if int(item.get("ParentProcessId") or 0) not in operator_ids]
     return roots or processes
@@ -733,7 +796,10 @@ class OperatorUi(ctk.CTk):
         self.title("BaseClaw")
         self.geometry("690x760+24+24")
         self.minsize(560, 540)
-        self.values = read_env(ENV_PATH)
+        self.profile_name = MAIN_PROFILE
+        self.profile_var = tk.StringVar(value=self.profile_name)
+        self.profile_combo: ctk.CTkComboBox | None = None
+        self.values = self._profile_values(self.profile_name)
         self.vars: dict[str, tk.StringVar] = {}
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
@@ -780,6 +846,70 @@ class OperatorUi(ctk.CTk):
         self.after(900, self.send_ui_startup_notice)
         self.after(5000, self.auto_refresh_status)
 
+    @property
+    def env_path(self) -> Path:
+        return profile_env_path(self.profile_name)
+
+    @property
+    def log_path(self) -> Path:
+        return profile_log_path(self.profile_name)
+
+    def _profile_values(self, profile: str) -> dict[str, str]:
+        values = read_env(profile_env_path(profile))
+        values.setdefault("TELEGRAM_OPERATOR_WORKDIR", str(profile_workdir(profile)))
+        values["TELEGRAM_OPERATOR_STATE_PATH"] = str(profile_state_path(profile))
+        values["TELEGRAM_OPERATOR_MEMORY_LOG"] = str(profile_memory_log_path(profile))
+        values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(profile_sqlite_path(profile))
+        values["TELEGRAM_OPERATOR_LOG_PATH"] = str(profile_log_path(profile))
+        return values
+
+    def _refresh_profile_combo(self) -> None:
+        if self.profile_combo:
+            self.profile_combo.configure(values=list_profiles())
+
+    def create_profile(self) -> None:
+        name = simpledialog.askstring("New agent profile", "Profile name:", parent=self)
+        if not name:
+            return
+        profile = safe_profile_name(name)
+        if profile == MAIN_PROFILE:
+            messagebox.showerror("Profile exists", "The main profile already exists.")
+            return
+        target_env = profile_env_path(profile)
+        if target_env.exists():
+            messagebox.showerror("Profile exists", f"Profile already exists: {profile}")
+            return
+        self.save(show_message=False)
+        values = self.current_values()
+        values["TELEGRAM_BOT_TOKEN"] = ""
+        values["TELEGRAM_ALLOWED_CHAT_IDS"] = ""
+        values["TELEGRAM_OPERATOR_WORKDIR"] = str(profile_workdir(profile))
+        values["TELEGRAM_OPERATOR_STATE_PATH"] = str(profile_state_path(profile))
+        values["TELEGRAM_OPERATOR_MEMORY_LOG"] = str(profile_memory_log_path(profile))
+        values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(profile_sqlite_path(profile))
+        values["TELEGRAM_OPERATOR_LOG_PATH"] = str(profile_log_path(profile))
+        target_env.parent.mkdir(parents=True, exist_ok=True)
+        profile_workdir(profile).mkdir(parents=True, exist_ok=True)
+        write_env(target_env, values)
+        self._refresh_profile_combo()
+        self.profile_var.set(profile)
+        self.on_profile_selected(profile)
+
+    def on_profile_selected(self, value: str | None = None) -> None:
+        profile = safe_profile_name(value or self.profile_var.get() or MAIN_PROFILE)
+        if profile == self.profile_name:
+            return
+        if self.autosave_ready:
+            self.save(show_message=False)
+        self.profile_name = profile
+        self.profile_var.set(profile)
+        self.values = self._profile_values(profile)
+        self._load_values_into_vars()
+        self.refresh_voices()
+        self.refresh_status()
+        self.refresh_chat_history()
+        self.set_status("Profile selected", f"Using profile: {profile}", None)
+
     def _build(self) -> None:
         self.configure(fg_color=COLORS["bg"])
         self.grid_columnconfigure(0, weight=1)
@@ -789,6 +919,7 @@ class OperatorUi(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", padx=22, pady=(22, 10))
         header.grid_columnconfigure(0, weight=1)
         header.grid_columnconfigure(1, weight=0)
+        header.grid_columnconfigure(2, weight=0)
 
         title = ctk.CTkLabel(header, text="BaseClaw", font=ctk.CTkFont(size=26, weight="bold"))
         title.grid(row=0, column=0, sticky="w")
@@ -822,6 +953,34 @@ class OperatorUi(ctk.CTk):
             command=self.open_settings,
         )
         self.settings_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(10, 0))
+
+        profile_bar = ctk.CTkFrame(header, fg_color="transparent")
+        profile_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        profile_bar.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            profile_bar,
+            text="Agent profile",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.profile_combo = ctk.CTkComboBox(
+            profile_bar,
+            variable=self.profile_var,
+            values=list_profiles(),
+            command=self.on_profile_selected,
+            height=34,
+            corner_radius=12,
+            border_width=1,
+        )
+        self.profile_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            profile_bar,
+            text="New profile",
+            width=112,
+            height=34,
+            corner_radius=12,
+            command=self.create_profile,
+        ).grid(row=0, column=2, sticky="e")
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 16))
@@ -1559,7 +1718,7 @@ class OperatorUi(ctk.CTk):
                 return
 
     def current_values(self) -> dict[str, str]:
-        values = read_env(ENV_PATH)
+        values = read_env(self.env_path)
         for key, var in self.vars.items():
             values[key] = var.get().strip()
         values["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = language_code(
@@ -1595,11 +1754,12 @@ class OperatorUi(ctk.CTk):
         )
         values["TELEGRAM_OPERATOR_SAFE_MODE"] = "true" if values["TELEGRAM_OPERATOR_ACTION_MODE"] == "approve" else "false"
         values["TELEGRAM_OPERATOR_STARTUP_NOTICE"] = "true"
-        workdir = values.get("TELEGRAM_OPERATOR_WORKDIR") or str(DEFAULT_WORKSPACE)
+        workdir = values.get("TELEGRAM_OPERATOR_WORKDIR") or str(profile_workdir(self.profile_name))
         values["TELEGRAM_OPERATOR_WORKDIR"] = workdir
-        values.setdefault("TELEGRAM_OPERATOR_STATE_PATH", str(BASE_DIR / "telegram_operator_state.json"))
-        values.setdefault("TELEGRAM_OPERATOR_MEMORY_LOG", str(BASE_DIR / "telegram_operator_memory.jsonl"))
-        values.setdefault("TELEGRAM_OPERATOR_SQLITE_PATH", str(BASE_DIR / "telegram_operator_messages.sqlite3"))
+        values["TELEGRAM_OPERATOR_STATE_PATH"] = str(profile_state_path(self.profile_name))
+        values["TELEGRAM_OPERATOR_MEMORY_LOG"] = str(profile_memory_log_path(self.profile_name))
+        values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(profile_sqlite_path(self.profile_name))
+        values["TELEGRAM_OPERATOR_LOG_PATH"] = str(profile_log_path(self.profile_name))
         host = values.get("TELEGRAM_OPERATOR_REMOTE_HOST", "").strip()
         speech_port = values.get("TELEGRAM_OPERATOR_SPEECH_PORT", "").strip() or "8766"
         llm_port = values.get("TELEGRAM_OPERATOR_LLM_PORT", "").strip() or "1234"
@@ -1618,8 +1778,56 @@ class OperatorUi(ctk.CTk):
             values["TELEGRAM_OPERATOR_PROVIDER"] = "jcode"
         if values["TELEGRAM_OPERATOR_PROVIDER"] != "custom":
             values["TELEGRAM_OPERATOR_AGENT_COMMAND"] = ""
-        values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(BASE_DIR / "telegram_operator_messages.sqlite3")
         return values
+
+    def _load_values_into_vars(self) -> None:
+        was_ready = self.autosave_ready
+        self.autosave_ready = False
+        try:
+            values = self._profile_values(self.profile_name)
+            provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
+            if provider not in PROVIDERS:
+                provider = "jcode"
+            run_mode = values.get("TELEGRAM_OPERATOR_RUN_MODE", "").strip()
+            if not run_mode:
+                run_mode = "cloud" if provider in CLOUD_HARNESSES else "local"
+            model_provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip() or "lmstudio"
+            safety_value = values.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip()
+            legacy = values.get("TELEGRAM_OPERATOR_SAFE_MODE", DEFAULTS["TELEGRAM_OPERATOR_SAFE_MODE"])
+            if not safety_value:
+                safety_value = "restricted" if legacy.strip().lower() in {"1", "true", "yes", "on"} else "safe"
+            access_scope = values.get("TELEGRAM_OPERATOR_ACCESS_SCOPE", "").strip()
+            action_mode = values.get("TELEGRAM_OPERATOR_ACTION_MODE", "").strip()
+            if not access_scope:
+                access_scope = "code" if safety_value == "code" else "full" if safety_value == "full" else "workspace"
+            if not action_mode:
+                action_mode = "approve" if safety_value == "restricted" else "full"
+
+            display_overrides = {
+                "TELEGRAM_OPERATOR_RUN_MODE": run_mode_display(run_mode),
+                "TELEGRAM_OPERATOR_MODEL_PROVIDER": model_provider_display(model_provider),
+                "TELEGRAM_OPERATOR_ACCESS_SCOPE": access_scope_display(access_scope),
+                "TELEGRAM_OPERATOR_ACTION_MODE": action_mode_display(action_mode),
+                "TELEGRAM_OPERATOR_SAFETY_MODE": safety_display(safety_value),
+                "TELEGRAM_OPERATOR_KOKORO_LANG_CODE": language_display(
+                    values.get("TELEGRAM_OPERATOR_KOKORO_LANG_CODE", DEFAULTS["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"])
+                ),
+            }
+            for key, var in self.vars.items():
+                if key == "TELEGRAM_OPERATOR_PROVIDER":
+                    var.set(provider)
+                elif key in display_overrides:
+                    var.set(display_overrides[key])
+                else:
+                    var.set(values.get(key, DEFAULTS.get(key, "")))
+            if self.harness_combo:
+                self.harness_combo.configure(values=self._harness_options(run_mode))
+            if self.model_combo:
+                model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip() or "qwen3-coder-30b"
+                self.model_combo.configure(values=self._model_options(provider, model))
+            self._sync_agent_option_visibility()
+        finally:
+            self.autosave_ready = was_ready
 
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
         voice_enabled = parse_bool(values.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True)
@@ -1655,7 +1863,7 @@ class OperatorUi(ctk.CTk):
         values["TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED"] = "false"
         if "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED" in self.vars:
             self.vars["TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED"].set("false")
-        write_env(ENV_PATH, values)
+        write_env(self.env_path, values)
         self.values = values
         self.set_status("Text-only", detail, None)
         messagebox.showwarning("Starting text-only", detail)
@@ -1680,14 +1888,14 @@ class OperatorUi(ctk.CTk):
 
     def _autosave(self) -> None:
         self.autosave_after_id = None
-        write_env(ENV_PATH, self.current_values())
+        write_env(self.env_path, self.current_values())
         self.set_status("Saved", "Settings saved automatically.", None)
 
     def save(self, show_message: bool = True) -> None:
-        write_env(ENV_PATH, self.current_values())
-        self.set_status("Saved", f"Settings saved to {ENV_PATH}", None)
+        write_env(self.env_path, self.current_values())
+        self.set_status("Saved", f"Settings saved to {self.env_path}", None)
         if show_message:
-            messagebox.showinfo("Saved", f"Saved settings to {ENV_PATH}")
+            messagebox.showinfo("Saved", f"Saved settings to {self.env_path}")
 
     def send_ui_startup_notice(self) -> None:
         values = self.current_values()
@@ -1788,12 +1996,12 @@ class OperatorUi(ctk.CTk):
 
     def refresh_status(self) -> None:
         try:
-            processes = root_operator_processes()
+            processes = root_operator_processes(self.env_path)
             if processes:
                 pids = ", ".join(str(item["ProcessId"]) for item in processes)
-                self.set_status("Running", f"Operator running, pid(s): {pids}", True)
+                self.set_status("Running", f"{self.profile_name} running, pid(s): {pids}", True)
             else:
-                self.set_status("Stopped", "Operator is stopped.", False)
+                self.set_status("Stopped", f"{self.profile_name} operator is stopped.", False)
         except Exception as exc:
             self.set_status("Error", f"Status error: {exc}", False)
         self.refresh_log()
@@ -1807,8 +2015,8 @@ class OperatorUi(ctk.CTk):
             return
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
-        if LOG_PATH.exists():
-            lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
+        if self.log_path.exists():
+            lines = self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-80:]
             self.log_box.insert("end", redact_secrets("\n".join(lines)))
         self.log_box.configure(state="disabled")
 
@@ -2484,7 +2692,7 @@ class OperatorUi(ctk.CTk):
             self.set_status("Gemini ready", gemini_detail, None)
         if not self.ensure_speech_ready(values):
             return
-        existing = root_operator_processes()
+        existing = root_operator_processes(self.env_path)
         if existing:
             pids = ", ".join(str(item["ProcessId"]) for item in existing)
             self.set_status("Running", f"Already running, pid(s): {pids}", True)
@@ -2497,15 +2705,21 @@ class OperatorUi(ctk.CTk):
                 messagebox.showerror("Setup needed", f"Missing supervisor script:\n{SUPERVISOR_SCRIPT}")
                 return
             powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+            env = dict(os.environ)
+            env["BASECLAW_OPERATOR_ENV_PATH"] = str(self.env_path)
             subprocess.Popen(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT)],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT), "-ProfileEnv", str(self.env_path)],
                 cwd=str(BASE_DIR),
+                env=env,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         else:
+            env = dict(os.environ)
+            env["BASECLAW_OPERATOR_ENV_PATH"] = str(self.env_path)
             subprocess.Popen(
-                [sys.executable, str(OPERATOR_SCRIPT)],
+                [sys.executable, str(OPERATOR_SCRIPT), "--profile-env", str(self.env_path)],
                 cwd=str(BASE_DIR),
+                env=env,
                 start_new_session=True,
             )
         self.after(1500, self.refresh_status)
@@ -2519,13 +2733,13 @@ class OperatorUi(ctk.CTk):
                     if show_errors:
                         messagebox.showerror("Stop failed", str(exc))
 
-        processes = operator_processes()
+        processes = operator_processes(self.env_path)
         supervisors = [item for item in processes if SUPERVISOR_SCRIPT.name in item.get("CommandLine", "")]
         workers = [item for item in processes if item not in supervisors]
         kill_items(supervisors)
         kill_items(workers)
         time.sleep(0.4)
-        kill_items(operator_processes())
+        kill_items(operator_processes(self.env_path))
 
     def stop_operator(self) -> None:
         self.set_status("Stopping", "Stopping operator...", None)
@@ -2710,6 +2924,7 @@ class OperatorUi(ctk.CTk):
             ".venv-kokoro",
             ".venv-telegram-agent",
             "agent_workspace",
+            "profiles",
             "telegram_codex_operator.log",
             "telegram_operator_messages.sqlite3",
             "telegram_operator_memory.jsonl",

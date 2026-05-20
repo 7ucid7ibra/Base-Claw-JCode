@@ -37,9 +37,18 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
 DEFAULT_WORKSPACE = PROJECT_ROOT / "agent_workspace"
-OPERATOR_ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
+def _operator_env_path_from_args() -> Path:
+    if "--profile-env" in sys.argv:
+        index = sys.argv.index("--profile-env")
+        if index + 1 < len(sys.argv):
+            return Path(sys.argv[index + 1]).expanduser()
+    return Path(os.environ.get("BASECLAW_OPERATOR_ENV_PATH") or PROJECT_ROOT / ".env.telegram-operator").expanduser()
+
+
+OPERATOR_ENV_PATH = _operator_env_path_from_args()
 load_dotenv(OPERATOR_ENV_PATH, override=True)
-LOG_PATH = BASE_DIR / "telegram_codex_operator.log"
+LOG_PATH = Path(os.environ.get("TELEGRAM_OPERATOR_LOG_PATH") or BASE_DIR / "telegram_codex_operator.log").expanduser()
+LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",

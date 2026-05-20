@@ -30,6 +30,7 @@ rsync -a --delete \
   --exclude ".venv*/" \
   --exclude "__pycache__/" \
   --exclude "agent_workspace/" \
+  --exclude "profiles/" \
   --exclude "build/" \
   --exclude "dist/" \
   --exclude "tools/" \

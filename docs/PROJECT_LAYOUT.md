@@ -37,4 +37,4 @@ Root convenience scripts:
 - `start-ui.ps1`
 - `run-operator.ps1`
 
-Runtime files such as `.env.telegram-operator`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
+Runtime files such as `.env.telegram-operator`, `profiles/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.

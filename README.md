@@ -267,6 +267,7 @@ BaseClaw includes a Telegram-controlled coding-agent operator bridge:
 - Compact live status updates during long foreground tasks
 - Kokoro voice replies with selectable voice
 - A small local settings UI
+- Named agent profiles for running multiple isolated Telegram bots from one install
 - Configurable access and action safety modes
 
 Files:
@@ -303,7 +304,7 @@ python app\telegram_codex_operator.py
 
 You can also run `.\run-operator.ps1` to keep the operator restarting after crashes.
 
-The operator reads its own dedicated config from `.env.telegram-operator`, so it can stay pinned to a specific bot, chat allowlist, workspace home, selected harness, model provider, and Kokoro voice.
+The operator reads its own dedicated config from `.env.telegram-operator`, so it can stay pinned to a specific bot, chat allowlist, workspace home, selected harness, model provider, and Kokoro voice. The UI can also create named agent profiles. Each profile gets its own env file, workspace, SQLite history, session state, and logs under `profiles/<name>/`, so multiple Telegram bots can run at the same time from one BaseClaw install.
 
 `.env.telegram-operator` is local-only and ignored by git. Start from `.env.telegram-operator.example`, then fill in your own bot token and allowed chat id. If a real bot token was ever committed or shared, rotate it before publishing the project.
 
