@@ -30,6 +30,7 @@ Usage:
 
 What it does:
   - creates/updates the Python UI/operator virtual environment
+  - creates a macOS Applications launcher when running on macOS
   - optionally installs Codex CLI, Claude CLI, and JCode during setup
   - checks LM Studio and Ollama availability
   - optionally creates/updates the Kokoro voice server virtual environment during setup
@@ -306,6 +307,15 @@ BASECLAW_WITH_KOKORO=$kokoro
 EOF
 }
 
+install_macos_launcher() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return
+  fi
+  if [[ -x "scripts/install_macos_launcher.sh" ]]; then
+    "scripts/install_macos_launcher.sh" || say "Could not create the macOS launcher. You can still start BaseClaw with ./start.sh."
+  fi
+}
+
 say "BaseClaw setup"
 if [[ "$SETUP_MODE" == "1" ]]; then
   say "Setup mode: optional install questions may be shown."
@@ -333,6 +343,7 @@ ensure_ollama
 say "Checking optional voice tooling..."
 setup_kokoro
 write_install_config
+install_macos_launcher
 
 say "Setup complete."
 
