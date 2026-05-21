@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import logging
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,7 +12,6 @@ import sys
 import tempfile
 from typing import Dict, List, Optional
 
-from faster_whisper import WhisperModel
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
@@ -51,7 +52,6 @@ app = FastAPI(title="Kokoro TTS Server", version="1.0.0")
 _pipelines: Dict[str, KPipeline] = {}
 _german_module = None
 _german_model = None
-_whisper_models: Dict[str, WhisperModel] = {}
 
 
 class SynthRequest(BaseModel):
@@ -249,21 +249,24 @@ def synthesize_audio(request: SynthRequest) -> np.ndarray:
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
-def get_whisper_model(model_name: str) -> WhisperModel:
-    model_name = model_name.strip() or "small"
-    model = _whisper_models.get(model_name)
-    if model is None:
-        logger.info("Loading faster-whisper model=%s", model_name)
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
-        _whisper_models[model_name] = model
-        logger.info("Loaded faster-whisper model=%s", model_name)
-    return model
-
-
 def transcribe_audio(audio_path: Path, model_name: str) -> str:
-    model = get_whisper_model(model_name)
-    segments, _info = model.transcribe(str(audio_path), vad_filter=True)
-    text = " ".join(segment.text.strip() for segment in segments).strip()
+    model_name = model_name.strip() or "small"
+    worker = APP_DIR / "whisper_worker.py"
+    timeout = int(os.environ.get("BASECLAW_WHISPER_TIMEOUT_SECONDS", "300"))
+    process = subprocess.run(
+        [sys.executable, str(worker), "--model", model_name, str(audio_path)],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout).strip() or "Whisper worker failed"
+        raise HTTPException(status_code=400, detail=detail)
+    try:
+        result = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Whisper worker returned invalid JSON") from exc
+    text = str(result.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Whisper returned an empty transcript")
     return text
@@ -314,7 +317,7 @@ def health() -> dict:
         "service": "kokoro-tts",
         "repo_id": REPO_ID,
         "loaded_lang_codes": sorted(_pipelines.keys()),
-        "loaded_whisper_models": sorted(_whisper_models.keys()),
+        "whisper_mode": "isolated_subprocess",
     }
 
 
