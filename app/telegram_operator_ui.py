@@ -34,6 +34,7 @@ PROFILES_DIR = PROJECT_ROOT / "profiles"
 MAIN_PROFILE = "main"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
+SPEECH_SCRIPT = PROJECT_ROOT / "scripts" / "speech_server.sh"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
 UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
 DEFAULT_UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
@@ -719,27 +720,121 @@ def local_speech_urls() -> list[str]:
     return unique
 
 
+def local_speech_python_path() -> Path:
+    if sys.platform.startswith("win"):
+        python = BASE_DIR / ".venv-kokoro" / "Scripts" / "pythonw.exe"
+        if not python.exists():
+            python = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
+        return python
+    return BASE_DIR / ".venv-kokoro" / "bin" / "python"
+
+
+def local_speech_installed() -> bool:
+    return local_speech_python_path().exists()
+
+
+def local_speech_state() -> tuple[str, str]:
+    if speech_health(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]):
+        return "running", "Local speech server is running."
+    if local_speech_installed():
+        return "stopped", "Local speech support is installed."
+    return "not_installed", "Local speech support is not installed."
+
+
+def write_local_speech_installed_flag() -> None:
+    config_path = PROJECT_ROOT / ".baseclaw-install.conf"
+    lines = []
+    if config_path.exists():
+        try:
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+    replaced = False
+    next_lines = []
+    for line in lines:
+        if line.startswith("BASECLAW_WITH_KOKORO="):
+            next_lines.append("BASECLAW_WITH_KOKORO=1")
+            replaced = True
+        else:
+            next_lines.append(line)
+    if not replaced:
+        if next_lines and next_lines[-1].strip():
+            next_lines.append("")
+        next_lines.append("BASECLAW_WITH_KOKORO=1")
+    config_path.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
+
+
+def run_speech_script(action: str, timeout: int = 120) -> tuple[bool, str]:
+    if sys.platform.startswith("win") or not SPEECH_SCRIPT.exists():
+        return False, "Speech helper script is only available on macOS/Linux."
+    result = subprocess.run(
+        ["bash", str(SPEECH_SCRIPT), action],
+        cwd=str(BASE_DIR),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    detail = (result.stdout or result.stderr).strip()
+    return result.returncode == 0, detail or f"speech_server.sh {action} exited with {result.returncode}"
+
+
+def install_local_speech_host() -> tuple[bool, str]:
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("install", timeout=900)
+    py = shutil.which("python3.12") or shutil.which("python3.11") or shutil.which("python3") or sys.executable
+    venv = BASE_DIR / ".venv-kokoro"
+    if not venv.exists():
+        subprocess.run([py, "-m", "venv", str(venv)], cwd=str(BASE_DIR), check=True, timeout=120)
+    python = local_speech_python_path()
+    if not python.exists():
+        return False, "Could not create the local speech virtual environment."
+    subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"], cwd=str(BASE_DIR), check=True, timeout=300)
+    subprocess.run([str(python), "-m", "pip", "install", "-r", "requirements/kokoro.txt"], cwd=str(BASE_DIR), check=True, timeout=900)
+    write_local_speech_installed_flag()
+    return True, "Local speech support installed."
+
+
 def start_local_speech_host() -> tuple[bool, str]:
     for url in local_speech_urls():
         if speech_health(url):
             return True, f"Local speech host is already running at {url}."
-    python = BASE_DIR / ".venv-kokoro" / "Scripts" / "pythonw.exe"
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("start")
+    python = local_speech_python_path()
     if not python.exists():
-        python = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
-    if not python.exists():
-        return False, "Local speech fallback is enabled, but .venv-kokoro was not found. Start a remote host or install host mode."
+        return False, "Local speech support is not installed."
     script = APP_DIR / "kokoro_server.py"
-    subprocess.Popen(
-        [str(python), str(script)],
-        cwd=str(BASE_DIR),
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    kwargs: dict[str, Any] = {"cwd": str(BASE_DIR)}
+    if sys.platform.startswith("win"):
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([str(python), str(script)], **kwargs)
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         if speech_health(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]):
             return True, "Started local speech host."
         time.sleep(1)
     return False, "Timed out waiting for local speech host on 127.0.0.1:8766."
+
+
+def stop_local_speech_host() -> tuple[bool, str]:
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("stop")
+    stopped = 0
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = " ".join(process.info.get("cmdline") or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if "kokoro_server.py" not in cmdline:
+            continue
+        try:
+            process.terminate()
+            stopped += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return True, f"Stopped {stopped} local speech process(es)."
 
 
 def language_display(value: str) -> str:
@@ -979,6 +1074,9 @@ class OperatorUi(ctk.CTk):
         self.vars: dict[str, tk.StringVar] = {}
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
+        self.speech_status_label: ctk.CTkLabel | None = None
+        self.speech_action_button: ctk.CTkButton | None = None
+        self.speech_action_running = False
         self.harness_combo: ctk.CTkComboBox | None = None
         self.local_provider_label: ctk.CTkLabel | None = None
         self.local_provider_combo: ctk.CTkComboBox | None = None
@@ -1024,6 +1122,7 @@ class OperatorUi(ctk.CTk):
         self._wire_autosave()
         self.autosave_ready = True
         self.refresh_voices()
+        self.refresh_speech_server_status()
         self.refresh_status()
         self.refresh_chat_history()
         self.after(900, self.send_ui_startup_notice)
@@ -1388,9 +1487,28 @@ class OperatorUi(ctk.CTk):
         self.vars["TELEGRAM_OPERATOR_KOKORO_VOICE"] = tk.StringVar(
             value=self.values.get("TELEGRAM_OPERATOR_KOKORO_VOICE", DEFAULTS["TELEGRAM_OPERATOR_KOKORO_VOICE"])
         )
-        self._label(voice, "Voice", row=0)
+        speech_header = ctk.CTkFrame(voice, fg_color="transparent")
+        speech_header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        speech_header.grid_columnconfigure(0, weight=1)
+        self.speech_status_label = ctk.CTkLabel(
+            speech_header,
+            text="Local speech: checking",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12),
+        )
+        self.speech_status_label.grid(row=0, column=0, sticky="w")
+        self.speech_action_button = ctk.CTkButton(
+            speech_header,
+            text="Start server",
+            width=148,
+            height=34,
+            corner_radius=10,
+            command=self.on_speech_action,
+        )
+        self.speech_action_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self._label(voice, "Voice", row=1)
         voice_row = ctk.CTkFrame(voice, fg_color="transparent")
-        voice_row.grid(row=1, column=0, sticky="ew", pady=(3, 12))
+        voice_row.grid(row=2, column=0, sticky="ew", pady=(3, 12))
         voice_row.grid_columnconfigure(0, weight=1)
         self.voice_combo = ctk.CTkComboBox(
             voice_row,
@@ -1406,7 +1524,7 @@ class OperatorUi(ctk.CTk):
             row=0, column=1, padx=(8, 0)
         )
         voice_options = ctk.CTkFrame(voice, fg_color="transparent")
-        voice_options.grid(row=2, column=0, sticky="ew")
+        voice_options.grid(row=3, column=0, sticky="ew")
         voice_options.grid_columnconfigure((0, 1), weight=1, uniform="voice_options")
         self.vars["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = tk.StringVar(
             value=language_display(
@@ -1435,7 +1553,7 @@ class OperatorUi(ctk.CTk):
             border_width=1,
         )
         self.whisper_combo.grid(row=1, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
-        self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=3)
+        self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=4)
 
         runtime = self._card(settings_body, "Runtime", "Start, stop, update, and monitor the bridge.", 0, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
@@ -2097,34 +2215,96 @@ class OperatorUi(ctk.CTk):
         finally:
             self.autosave_ready = was_ready
 
+    def refresh_speech_server_status(self) -> None:
+        state, detail = local_speech_state()
+        if self.speech_status_label:
+            status_text = {
+                "running": "Local speech: running",
+                "stopped": "Local speech: stopped",
+                "not_installed": "Local speech: not installed",
+            }.get(state, "Local speech: unknown")
+            self.speech_status_label.configure(text=status_text)
+        if self.speech_action_button and not self.speech_action_running:
+            button_text = {
+                "running": "Stop server",
+                "stopped": "Start server",
+                "not_installed": "Install local speech",
+            }.get(state, "Refresh")
+            self.speech_action_button.configure(text=button_text, state="normal")
+    def on_speech_action(self) -> None:
+        if self.speech_action_running:
+            return
+        state, _detail = local_speech_state()
+        if state == "not_installed":
+            if not messagebox.askyesno(
+                "Install local speech",
+                "Install local Kokoro and Whisper speech dependencies now? This can take several minutes.",
+            ):
+                return
+            action = "install"
+            label = "Installing"
+            detail = "Installing local speech support..."
+        elif state == "running":
+            action = "stop"
+            label = "Stopping"
+            detail = "Stopping local speech server..."
+        else:
+            action = "start"
+            label = "Starting"
+            detail = "Starting local speech server..."
+
+        self.speech_action_running = True
+        if self.speech_action_button:
+            self.speech_action_button.configure(text=label, state="disabled")
+        self.set_status(label, detail, None)
+
+        def worker() -> None:
+            try:
+                if action == "install":
+                    ok, result = install_local_speech_host()
+                elif action == "stop":
+                    ok, result = stop_local_speech_host()
+                else:
+                    ok, result = start_local_speech_host()
+            except Exception as exc:
+                ok, result = False, str(exc)
+            self.after(0, lambda: self._finish_speech_action(action, ok, result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_speech_action(self, action: str, ok: bool, detail: str) -> None:
+        self.speech_action_running = False
+        self.refresh_speech_server_status()
+        if ok:
+            label = "Speech installed" if action == "install" else "Speech stopped" if action == "stop" else "Speech running"
+            self.set_status(label, detail, True if action == "start" else None)
+            if action in {"install", "start"}:
+                self.refresh_voices()
+        else:
+            self.set_status("Speech failed", detail, False)
+            messagebox.showerror("Speech server", detail)
+
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
         voice_enabled = parse_bool(values.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True)
         remote = values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "").strip()
-        local_fallback = True
         if remote:
             if speech_health(remote):
                 return True
-        if local_fallback:
-            for url in local_speech_urls():
-                if speech_health(url):
-                    self.set_status("Speech ready", f"Using local speech host at {url}.", None)
-                    self.refresh_voices()
-                    return True
-            ok, detail = start_local_speech_host()
-            if not ok:
-                if voice_enabled:
-                    self._disable_voice_for_text_only_start(values, f"{detail} Starting text-only with voice replies disabled.")
-                else:
-                    self.set_status("Text-only", detail, None)
+        for url in local_speech_urls():
+            if speech_health(url):
+                self.set_status("Speech ready", f"Using local speech host at {url}.", None)
+                self.refresh_voices()
                 return True
-            self.set_status("Speech ready", detail, None)
-            self.refresh_voices()
-            return True
-        detail = "No STT/TTS host is configured. Starting text-only."
+        state, detail = local_speech_state()
+        if state == "not_installed":
+            detail = "Local speech is not installed. Starting text-only."
+        else:
+            detail = "Local speech server is stopped. Starting text-only."
         if voice_enabled:
             self._disable_voice_for_text_only_start(values, f"{detail} Voice replies are disabled until speech is configured.")
         else:
             self.set_status("Text-only", detail, None)
+        self.refresh_speech_server_status()
         return True
 
     def _disable_voice_for_text_only_start(self, values: dict[str, str], detail: str) -> None:
@@ -2276,6 +2456,8 @@ class OperatorUi(ctk.CTk):
 
     def auto_refresh_status(self) -> None:
         self.refresh_status()
+        if not self.speech_action_running:
+            self.refresh_speech_server_status()
         self.after(5000, self.auto_refresh_status)
 
     def check_for_updates(self) -> None:
