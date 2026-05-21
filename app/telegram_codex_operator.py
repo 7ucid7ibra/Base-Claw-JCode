@@ -418,7 +418,6 @@ class OperatorConfig:
     history_auto_sync_interval_seconds: int
     board_remote: str
     board_path: str
-    board_state_path: Path
     board_agent_aliases: list[str]
     source_update_remote: str
     manual_update_ref: str
@@ -483,20 +482,6 @@ class PendingApproval:
     text: str
     transcript: Optional[str]
     proposal: str
-    created_at: str
-
-
-@dataclass
-class PendingSourceUpdate:
-    chat_id: int
-    entry: dict[str, Any]
-    created_at: str
-
-
-@dataclass
-class PendingBoardEntry:
-    chat_id: int
-    entry: dict[str, Any]
     created_at: str
 
 
@@ -1894,8 +1879,6 @@ class TelegramCodexOperator:
         self.voice = KokoroVoiceReply(config.kokoro_urls, config.kokoro_voice, config.kokoro_lang_code)
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
-        self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
-        self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.pending_manual_updates: Dict[int, str] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
 
@@ -2506,27 +2489,8 @@ class TelegramCodexOperator:
             self.config.board_remote,
         ]
 
-    def _load_board_state(self) -> dict[str, Any]:
-        if not self.config.board_state_path.exists():
-            return {"initialized": False, "seen": []}
-        try:
-            data = json.loads(self.config.board_state_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            return {"initialized": False, "seen": []}
-        data.setdefault("initialized", False)
-        data.setdefault("seen", [])
-        return data
-
-    def _save_board_state(self, state: dict[str, Any]) -> None:
-        self.config.board_state_path.parent.mkdir(parents=True, exist_ok=True)
-        state["seen"] = list(dict.fromkeys(state.get("seen", [])))[-500:]
-        self.config.board_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
     def _board_entry_id(self, raw_line: str) -> str:
         return hashlib.sha256(raw_line.encode("utf-8", errors="replace")).hexdigest()
-
-    def _board_callback_id(self, entry: dict[str, Any]) -> str:
-        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
 
     def _fetch_board_entries(self) -> list[dict[str, Any]]:
         available, detail = self._board_available()
@@ -2572,118 +2536,6 @@ class TelegramCodexOperator:
         aliases.add("all")
         return any(str(item).strip().lower() in aliases for item in targets)
 
-    def _format_board_notice(self, entry: dict[str, Any]) -> str:
-        body = entry.get("body")
-        if isinstance(body, dict):
-            body_text = json.dumps(body, ensure_ascii=False)
-        else:
-            body_text = str(body or "").strip()
-        if len(body_text) > 1200:
-            body_text = body_text[:1197].rstrip() + "..."
-        return (
-            "New shared board entry noticed.\n"
-            f"From: {entry.get('agent', 'unknown')}\n"
-            f"Type: {entry.get('type', 'unknown')}\n"
-            f"Thread: {entry.get('thread_id', 'none')}\n"
-            f"Task: {entry.get('task_id', 'none')}\n"
-            f"Status: {entry.get('status', 'none')}\n\n"
-            f"{body_text}\n\n"
-            "Use the buttons below so the action stays tied to this exact board entry."
-        )
-
-    def _format_board_entry_details(self, entry: dict[str, Any]) -> str:
-        details = json.dumps(
-            {key: value for key, value in entry.items() if key != "_entry_id"},
-            ensure_ascii=False,
-            indent=2,
-        )
-        if len(details) > 3000:
-            details = details[:2997].rstrip() + "..."
-        return f"Board entry details:\n{details}"
-
-    def _mark_board_entry_choice(self, board_entry_id: str, choice: str) -> None:
-        state = self._load_board_state()
-        choices = state.setdefault("board_entry_choices", {})
-        choices[board_entry_id] = {"choice": choice, "time": utc_now()}
-        self._save_board_state(state)
-        self.message_store.mark_board_action_card(card_id=board_entry_id, card_type="board", choice=choice)
-
-    def _load_pending_board_entry(self, board_entry_id: str) -> Optional[PendingBoardEntry]:
-        pending = self.pending_board_entries.get(board_entry_id)
-        if pending is not None:
-            return pending
-        card = self.message_store.load_board_action_card(card_id=board_entry_id, card_type="board")
-        if not card:
-            return None
-        pending = PendingBoardEntry(
-            chat_id=int(card["chat_id"]),
-            entry=card["entry"],
-            created_at=str(card.get("created_at") or utc_now()),
-        )
-        self.pending_board_entries[board_entry_id] = pending
-        return pending
-
-    async def _send_board_entry_card(
-        self,
-        application: Application,
-        chat_id: int,
-        entry: dict[str, Any],
-    ) -> None:
-        board_entry_id = self._board_callback_id(entry)
-        self.pending_board_entries[board_entry_id] = PendingBoardEntry(
-            chat_id=chat_id,
-            entry=entry,
-            created_at=utc_now(),
-        )
-        self.message_store.save_board_action_card(
-            card_id=board_entry_id,
-            card_type="board",
-            chat_id=chat_id,
-            entry=entry,
-        )
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Proceed", callback_data=f"board:proceed:{board_entry_id}"),
-                    InlineKeyboardButton("Later", callback_data=f"board:later:{board_entry_id}"),
-                ],
-                [
-                    InlineKeyboardButton("Details", callback_data=f"board:details:{board_entry_id}"),
-                    InlineKeyboardButton("Dismiss", callback_data=f"board:dismiss:{board_entry_id}"),
-                ],
-            ]
-        )
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=self._format_board_notice(entry)[:3900],
-            reply_markup=keyboard,
-        )
-
-    def _build_board_entry_prompt(self, entry: dict[str, Any]) -> str:
-        body = entry.get("body")
-        body_text = json.dumps(body, ensure_ascii=False, indent=2) if isinstance(body, dict) else str(body or "")
-        meta = entry.get("meta")
-        meta_text = json.dumps(meta, ensure_ascii=False, indent=2) if isinstance(meta, dict) else str(meta or "")
-        return "\n\n".join(
-            [
-                "Handle the following shared board entry.",
-                "The user clicked the inline Proceed button for this exact entry.",
-                "Do not treat unrelated recent chat context as approval for a different board item.",
-                "If this is a source update candidate, review it according to SOURCE_CONTRIBUTION_REVIEW.md and report a result. Do not silently promote it to baseline.",
-                "If this is an implementation task, keep the work bounded to the board entry and report blockers clearly.",
-                f"From: {entry.get('agent', 'unknown')}",
-                f"Type: {entry.get('type', 'unknown')}",
-                f"To: {entry.get('to', 'unknown')}",
-                f"Thread: {entry.get('thread_id', 'none')}",
-                f"Task: {entry.get('task_id', 'none')}",
-                f"Status: {entry.get('status', 'none')}",
-                "Body:",
-                body_text,
-                "Meta:",
-                meta_text,
-            ]
-        )
-
     def _build_manual_board_check_prompt(self, entries: list[dict[str, Any]]) -> str:
         relevant_entries = [entry for entry in entries if self._board_entry_relevant(entry)]
         selected_entries = relevant_entries or entries[-12:]
@@ -2697,7 +2549,7 @@ class TelegramCodexOperator:
         scope = "relevant entries" if relevant_entries else "most recent entries"
         return "\n\n".join(
             [
-                "The user invoked the /pi shortcut to check the shared Raspberry Pi message board now.",
+                "The user typed checkpi to check the shared Raspberry Pi message board now.",
                 f"Review these {scope} from the board.",
                 "Identify anything addressed to this supervisor, this profile, or all supervisors.",
                 "Summarize actionable items clearly. If safe and bounded, proceed with the needed follow-up. Report blockers instead of guessing.",
@@ -2705,106 +2557,6 @@ class TelegramCodexOperator:
                 entries_text or "No board entries were found.",
             ]
         )
-
-    def _source_update_payload(self, entry: dict[str, Any]) -> dict[str, Any]:
-        body = entry.get("body")
-        if isinstance(body, dict):
-            return body
-        return {"purpose": str(body or "").strip()}
-
-    def _source_update_id(self, entry: dict[str, Any]) -> str:
-        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
-
-    def _format_source_update_card(self, entry: dict[str, Any]) -> str:
-        body = self._source_update_payload(entry)
-        purpose = str(body.get("purpose") or "").strip() or "No purpose provided."
-        if len(purpose) > 900:
-            purpose = purpose[:897].rstrip() + "..."
-        lines = [
-            "Source update available.",
-            f"Repo: {body.get('repo_id') or 'unknown'}",
-            f"Branch: {body.get('branch') or 'unknown'}",
-            f"Commit: {body.get('commit') or 'unknown'}",
-            f"Action: {body.get('action_for_supervisors') or 'unspecified'}",
-            "",
-            purpose,
-            "",
-            "Choose Update now only if you want this supervisor to adopt the accepted baseline.",
-        ]
-        return "\n".join(lines)
-
-    def _format_source_update_details(self, entry: dict[str, Any]) -> str:
-        body = self._source_update_payload(entry)
-        details = json.dumps(body, ensure_ascii=False, indent=2)
-        if len(details) > 3000:
-            details = details[:2997].rstrip() + "..."
-        return f"Source update details:\n{details}"
-
-    def _mark_source_update_choice(self, source_update_id: str, choice: str) -> None:
-        state = self._load_board_state()
-        choices = state.setdefault("source_update_choices", {})
-        choices[source_update_id] = {"choice": choice, "time": utc_now()}
-        self._save_board_state(state)
-        self.message_store.mark_board_action_card(card_id=source_update_id, card_type="source", choice=choice)
-
-    def _load_pending_source_update(self, source_update_id: str) -> Optional[PendingSourceUpdate]:
-        pending = self.pending_source_updates.get(source_update_id)
-        if pending is not None:
-            return pending
-        card = self.message_store.load_board_action_card(card_id=source_update_id, card_type="source")
-        if not card:
-            return None
-        pending = PendingSourceUpdate(
-            chat_id=int(card["chat_id"]),
-            entry=card["entry"],
-            created_at=str(card.get("created_at") or utc_now()),
-        )
-        self.pending_source_updates[source_update_id] = pending
-        return pending
-
-    def _validate_source_update_for_pull(self, pending: PendingSourceUpdate) -> tuple[bool, str, dict[str, Any]]:
-        body = self._source_update_payload(pending.entry)
-        repo_id = str(body.get("repo_id") or "").strip()
-        branch = str(body.get("branch") or "").strip()
-        commit = str(body.get("commit") or "").strip()
-        contributor = str(body.get("contributor") or "").strip()
-        reviewer = str(body.get("reviewer") or "").strip()
-        if repo_id and repo_id != "agent-system":
-            return False, f"Unsupported repo: {repo_id}", body
-        if not branch:
-            return False, "Board entry has no branch.", body
-        if not commit:
-            return False, "Board entry has no commit.", body
-        if not contributor or not reviewer:
-            return False, "Board entry has no contributor/reviewer metadata.", body
-        if contributor == reviewer:
-            return False, "Contributor and reviewer are the same.", body
-        if self._git_dirty():
-            return False, "Local worktree is not clean.", body
-        return True, "ok", body
-
-    def _pull_source_update(self, pending: PendingSourceUpdate) -> str:
-        ok, reason, body = self._validate_source_update_for_pull(pending)
-        if not ok:
-            return f"Update blocked: {reason}"
-        branch = str(body.get("branch") or "main").strip()
-        commit = str(body.get("commit") or "").strip()
-        remote = self._select_source_update_remote()
-        if not remote:
-            return (
-                "Update blocked: no usable source update remote is configured. "
-                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a source mirror remote."
-            )
-        fetch = self._git_command(["fetch", remote, branch])
-        if fetch.returncode != 0:
-            return "Update blocked: git fetch failed: " + (fetch.stderr or fetch.stdout).strip()
-        current = self._git_command(["rev-parse", "--short", "HEAD"])
-        if current.returncode == 0 and current.stdout.strip() == commit[: len(current.stdout.strip())]:
-            return f"Already current at {current.stdout.strip()}."
-        merge = self._git_command(["merge", "--ff-only", commit])
-        if merge.returncode != 0:
-            return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
-        return f"Updated local source to {commit[:7]}. Restart the operator to run the new code."
 
     def _manual_update_ref(self, requested_ref: Optional[str] = None) -> str:
         ref = (requested_ref or "").strip() or self.config.manual_update_ref.strip() or DEFAULT_MANUAL_UPDATE_REF
@@ -2865,42 +2617,6 @@ class TelegramCodexOperator:
                 if "agent-system.git" in url or self.config.board_remote.split("@")[-1].split(":")[0] in url:
                     return "origin"
         return None
-
-    async def _send_source_update_card(
-        self,
-        application: Application,
-        chat_id: int,
-        entry: dict[str, Any],
-    ) -> None:
-        source_update_id = self._source_update_id(entry)
-        self.pending_source_updates[source_update_id] = PendingSourceUpdate(
-            chat_id=chat_id,
-            entry=entry,
-            created_at=utc_now(),
-        )
-        self.message_store.save_board_action_card(
-            card_id=source_update_id,
-            card_type="source",
-            chat_id=chat_id,
-            entry=entry,
-        )
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Update now", callback_data=f"source:update:{source_update_id}"),
-                    InlineKeyboardButton("Later", callback_data=f"source:later:{source_update_id}"),
-                ],
-                [
-                    InlineKeyboardButton("Decline", callback_data=f"source:decline:{source_update_id}"),
-                    InlineKeyboardButton("Details", callback_data=f"source:details:{source_update_id}"),
-                ],
-            ]
-        )
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=self._format_source_update_card(entry)[:3900],
-            reply_markup=keyboard,
-        )
 
     async def history_auto_sync_loop(self) -> None:
         if not self.config.history_auto_sync_enabled:
@@ -3578,7 +3294,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
             f"Voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
             f"Local speech fallback: {self.config.local_speech_fallback}\n"
-            f"Pi board: manual /pi check\n"
+            f"Pi board: manual checkpi text shortcut\n"
             f"History auto-sync: {'on' if self.config.history_auto_sync_enabled else 'off'}"
         )
 
@@ -3632,7 +3348,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         text = (
             "BaseClaw help menu.\n"
             "Use the buttons below for common operator actions.\n\n"
-            "/pi or /checkpi: check the shared Raspberry Pi board now.\n\n"
+            "Type checkpi to check the shared Raspberry Pi board now.\n\n"
             "Board behavior: supervisor-to-supervisor messages should go through targeted shared board entries, so the recipient can handle them with the right context."
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
@@ -3853,11 +3569,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
     async def check_pi_board(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
-        command_text = update.effective_message.text if update.effective_message else "/pi"
+        command_text = update.effective_message.text if update.effective_message else "checkpi"
         self._record_incoming_message(
             update,
-            event_type="command_pi_board",
-            message_type="command",
+            event_type="manual_pi_board_check",
+            message_type="text",
             text=command_text,
         )
         if not self._authorized(chat_id):
@@ -3872,7 +3588,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 context,
                 chat_id,
                 f"Pi board check failed: {exc}",
-                event_type="command_pi_board_failed",
+                event_type="manual_pi_board_check_failed",
             )
             return
         prompt = self._build_manual_board_check_prompt(entries)
@@ -4503,6 +4219,9 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
             return
+        if self._is_check_pi_shortcut(update.message.text):
+            await self.check_pi_board(update, context)
+            return
         self._record_incoming_message(
             update,
             event_type="incoming_text",
@@ -4510,6 +4229,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             text=update.message.text,
         )
         await self._process_user_message(update, context, update.message.text)
+
+    @staticmethod
+    def _is_check_pi_shortcut(text: str) -> bool:
+        normalized = re.sub(r"[\s_-]+", "", text.strip().lower())
+        return normalized in {"checkpi", "checkraspberrypi"}
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.voice:
@@ -4759,192 +4483,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         except Exception:
             LOGGER.exception("Failed to edit manual update callback message chat_id=%s", chat_id)
 
-    async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            await self._handle_source_update_callback(update, context)
-        except Exception as exc:
-            LOGGER.exception("Source update callback failed")
-            query = update.callback_query
-            if query:
-                try:
-                    await query.answer(f"Button failed: {exc}", show_alert=True)
-                except Exception:
-                    LOGGER.exception("Failed to answer failed source update callback")
-
-    async def _handle_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query or not query.data:
-            return
-        message = query.message
-        chat_id = None
-        if message and getattr(message, "chat", None):
-            chat_id = message.chat.id
-        elif update.effective_chat:
-            chat_id = update.effective_chat.id
-        if chat_id is None:
-            await query.answer("Could not identify this chat.", show_alert=True)
-            return
-        if not self._authorized(chat_id):
-            await query.answer("Unauthorized chat.", show_alert=True)
-            return
-
-        parts = query.data.split(":", 2)
-        if len(parts) != 3 or parts[0] != "source":
-            await query.answer()
-            return
-        action, source_update_id = parts[1], parts[2]
-        self._record_callback(update, f"source_{action}", source_update_id)
-        pending = self._load_pending_source_update(source_update_id)
-        if pending is None:
-            await query.answer("This source update card expired. Ask me to refresh board notices.", show_alert=True)
-            if message:
-                try:
-                    await query.edit_message_text("This source update card expired. Ask me to refresh board notices.")
-                except Exception:
-                    LOGGER.exception("Failed to edit expired source update card chat_id=%s", chat_id)
-            return
-        if pending.chat_id != chat_id:
-            await query.answer("This update belongs to a different chat.", show_alert=True)
-            return
-
-        if action == "details":
-            await query.answer("Details sent.")
-            await self._send_text_message(
-                context,
-                chat_id,
-                self._format_source_update_details(pending.entry),
-                event_type="source_update_details",
-                metadata={"source_update_id": source_update_id},
-            )
-            return
-        if action == "later":
-            self._mark_source_update_choice(source_update_id, "later")
-            await query.answer("Deferred.")
-            if message:
-                await query.edit_message_text("Source update deferred for this supervisor.")
-            return
-        if action == "decline":
-            self._mark_source_update_choice(source_update_id, "declined")
-            self.pending_source_updates.pop(source_update_id, None)
-            await query.answer("Declined.")
-            if message:
-                await query.edit_message_text("Source update declined for this supervisor.")
-            return
-        if action != "update":
-            await query.answer("Unknown action.", show_alert=True)
-            return
-
-        result = await asyncio.to_thread(self._pull_source_update, pending)
-        self._mark_source_update_choice(source_update_id, "update_now")
-        self.pending_source_updates.pop(source_update_id, None)
-        await query.answer("Update check finished.")
-        await self._send_text_message(
-            context,
-            chat_id,
-            result,
-            event_type="source_update_result",
-            metadata={"source_update_id": source_update_id},
-        )
-        if message:
-            try:
-                await query.edit_message_text(result[:3900])
-            except Exception:
-                LOGGER.exception("Failed to edit source update card chat_id=%s", chat_id)
-
-    async def on_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            await self._handle_board_entry_callback(update, context)
-        except Exception as exc:
-            LOGGER.exception("Board entry callback failed")
-            query = update.callback_query
-            if query:
-                try:
-                    await query.answer(f"Button failed: {exc}", show_alert=True)
-                except Exception:
-                    LOGGER.exception("Failed to answer failed board entry callback")
-
-    async def _handle_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query or not query.data:
-            return
-        message = query.message
-        chat_id = None
-        if message and getattr(message, "chat", None):
-            chat_id = message.chat.id
-        elif update.effective_chat:
-            chat_id = update.effective_chat.id
-        if chat_id is None:
-            await query.answer("Could not identify this chat.", show_alert=True)
-            return
-        if not self._authorized(chat_id):
-            await query.answer("Unauthorized chat.", show_alert=True)
-            return
-
-        parts = query.data.split(":", 2)
-        if len(parts) != 3 or parts[0] != "board":
-            await query.answer()
-            return
-        action, board_entry_id = parts[1], parts[2]
-        self._record_callback(update, f"board_{action}", board_entry_id)
-        pending = self._load_pending_board_entry(board_entry_id)
-        if pending is None:
-            await query.answer("This board card expired. Ask me to refresh board notices.", show_alert=True)
-            if message:
-                try:
-                    await query.edit_message_text("This board card expired. Ask me to refresh board notices.")
-                except Exception:
-                    LOGGER.exception("Failed to edit expired board entry card chat_id=%s", chat_id)
-            return
-        if pending.chat_id != chat_id:
-            await query.answer("This board entry belongs to a different chat.", show_alert=True)
-            return
-
-        if action == "details":
-            await query.answer("Details sent.")
-            await self._send_text_message(
-                context,
-                chat_id,
-                self._format_board_entry_details(pending.entry),
-                event_type="board_entry_details",
-                metadata={"board_entry_id": board_entry_id},
-            )
-            return
-        if action == "later":
-            self._mark_board_entry_choice(board_entry_id, "later")
-            await query.answer("Deferred.")
-            if message:
-                await query.edit_message_text("Board entry deferred for this supervisor.")
-            return
-        if action == "dismiss":
-            self._mark_board_entry_choice(board_entry_id, "dismissed")
-            self.pending_board_entries.pop(board_entry_id, None)
-            await query.answer("Dismissed.")
-            if message:
-                await query.edit_message_text("Board entry dismissed for this supervisor.")
-            return
-        if action != "proceed":
-            await query.answer("Unknown action.", show_alert=True)
-            return
-
-        self._mark_board_entry_choice(board_entry_id, "proceed")
-        self.pending_board_entries.pop(board_entry_id, None)
-        await query.answer("Proceeding.")
-        if message:
-            try:
-                await query.edit_message_text("Proceeding with this board entry.")
-            except Exception:
-                LOGGER.exception("Failed to edit board entry card chat_id=%s", chat_id)
-        prompt = self._build_board_entry_prompt(pending.entry)
-        asyncio.create_task(
-            self._process_user_message(
-                update,
-                context,
-                prompt,
-                transcript=None,
-                approved_proposal="User clicked Proceed on a shared board entry inline keyboard.",
-            )
-        )
-
     async def _run_approved_pending(self, context: ContextTypes.DEFAULT_TYPE, pending: PendingApproval) -> None:
         class ApprovalUser:
             id = 0
@@ -5073,10 +4611,6 @@ def load_config() -> OperatorConfig:
         ),
         board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
         board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "").strip(),
-        board_state_path=resolve_app_path(
-            os.environ.get("TELEGRAM_OPERATOR_BOARD_STATE_PATH", ""),
-            BASE_DIR / "telegram_operator_board_state.json",
-        ),
         board_agent_aliases=board_aliases,
         source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "").strip(),
         manual_update_ref=os.environ.get("TELEGRAM_OPERATOR_MANUAL_UPDATE_REF", DEFAULT_MANUAL_UPDATE_REF).strip()
@@ -5121,9 +4655,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("voice_off", operator.voice_off))
     application.add_handler(CommandHandler("history_status", operator.history_status))
     application.add_handler(CommandHandler("history_sync", operator.history_sync))
-    application.add_handler(CommandHandler("pi", operator.check_pi_board))
-    application.add_handler(CommandHandler("checkpi", operator.check_pi_board))
-    application.add_handler(CommandHandler("check_pi", operator.check_pi_board))
     application.add_handler(CommandHandler("update", operator.update_from_pi))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
@@ -5131,8 +4662,6 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(operator.on_reset_callback, pattern=r"^reset:"))
     application.add_handler(CallbackQueryHandler(operator.on_manual_update_callback, pattern=r"^update:"))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
-    application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
-    application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.VIDEO, operator.on_video))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
