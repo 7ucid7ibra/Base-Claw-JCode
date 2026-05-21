@@ -37,6 +37,7 @@ SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 SPEECH_SCRIPT = PROJECT_ROOT / "scripts" / "speech_server.sh"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
 UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
+APP_VERSION_PATH = PROJECT_ROOT / "VERSION"
 DEFAULT_UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
 
 
@@ -76,6 +77,16 @@ def configured_update_source_url() -> str:
 
 
 UPDATE_SOURCE_URL = configured_update_source_url()
+
+
+def read_app_version(path: Path = APP_VERSION_PATH) -> str:
+    try:
+        version = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        version = ""
+    return version or "dev"
+
+
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]
@@ -1072,6 +1083,7 @@ class OperatorUi(ctk.CTk):
         self.profile_combo: ctk.CTkComboBox | None = None
         self.values = self._profile_values(self.profile_name)
         self.vars: dict[str, tk.StringVar] = {}
+        self.version_label: ctk.CTkLabel | None = None
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
         self.speech_status_label: ctk.CTkLabel | None = None
@@ -1123,6 +1135,7 @@ class OperatorUi(ctk.CTk):
         self.autosave_ready = True
         self.refresh_voices()
         self.refresh_speech_server_status()
+        self.refresh_version_label()
         self.refresh_status()
         self.refresh_chat_history()
         self.after(900, self.send_ui_startup_notice)
@@ -1149,6 +1162,10 @@ class OperatorUi(ctk.CTk):
     def _refresh_profile_combo(self) -> None:
         if self.profile_combo:
             self.profile_combo.configure(values=list_profiles())
+
+    def refresh_version_label(self) -> None:
+        if self.version_label:
+            self.version_label.configure(text=f"Version {read_app_version()}")
 
     def create_profile(self) -> None:
         if self.chat_busy:
@@ -1245,6 +1262,13 @@ class OperatorUi(ctk.CTk):
 
         title = ctk.CTkLabel(header, text="BaseClaw", font=ctk.CTkFont(size=26, weight="bold"))
         title.grid(row=0, column=0, sticky="w")
+        self.version_label = ctk.CTkLabel(
+            header,
+            text=f"Version {read_app_version()}",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.version_label.grid(row=0, column=0, sticky="w", padx=(126, 0), pady=(8, 0))
         subtitle = ctk.CTkLabel(
             header,
             text="Local agent bridge for Telegram, desktop chat, speech, and safe controls.",
@@ -2381,6 +2405,7 @@ class OperatorUi(ctk.CTk):
             model = "Claude CLI default" if provider == "claude" else "Gemini CLI default" if provider == "gemini" else "Codex CLI default" if provider == "codex" else "JCode default"
         lines = [
             "BaseClaw UI opened.",
+            f"Version: {read_app_version()}",
             f"Mode: {run_mode}",
             f"Harness: {provider}",
             f"Model: {model}",
@@ -3393,6 +3418,7 @@ class OperatorUi(ctk.CTk):
                     self._safe_extract(archive, extract_dir)
                 roots = [item for item in extract_dir.iterdir() if item.is_dir()]
                 source_root = roots[0] if len(roots) == 1 else extract_dir
+                updated_version = read_app_version(source_root / "VERSION")
                 copied = self._overlay_update(source_root)
                 latest_commit = ""
                 github_repo = self._github_repo_from_source(source)
@@ -3401,9 +3427,10 @@ class OperatorUi(ctk.CTk):
                         latest_commit = self._latest_github_commit(github_repo)
                     except Exception:
                         latest_commit = ""
-                self._write_update_version_marker(source, archive_name, latest_commit)
+                self._write_update_version_marker(source, archive_name, latest_commit, updated_version)
+                self.refresh_version_label()
                 suffix = f" Local git changes were backed up in {backup_detail}." if backup_detail else ""
-                return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code.{suffix}"
+                return True, f"Updated to {updated_version} from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code.{suffix}"
         except Exception as exc:
             return False, str(exc)
 
@@ -3412,15 +3439,20 @@ class OperatorUi(ctk.CTk):
         if not github_repo:
             return False, "Automatic update checks currently support GitHub update sources."
         latest = self._latest_github_commit(github_repo)
+        latest_version = self._latest_github_version(github_repo)
         current = self._current_update_commit(UPDATE_SOURCE_URL)
+        current_version = self._current_update_version(UPDATE_SOURCE_URL)
         if not latest:
             return False, "Could not read the latest GitHub commit."
         short_latest = latest[:7]
         if current and current == latest:
-            return False, f"BaseClaw is current at {short_latest}."
+            version_text = latest_version or current_version or "current version"
+            return False, f"BaseClaw is current at {version_text} ({short_latest})."
         if current:
-            return True, f"New BaseClaw update available: {short_latest}."
-        return True, f"BaseClaw update available: {short_latest}."
+            version_text = f" {latest_version}" if latest_version else ""
+            return True, f"New BaseClaw update available:{version_text} ({short_latest})."
+        version_text = f" {latest_version}" if latest_version else ""
+        return True, f"BaseClaw update available:{version_text} ({short_latest})."
 
     def _current_update_commit(self, source: str) -> str:
         marker = self._read_update_version_marker()
@@ -3438,6 +3470,12 @@ class OperatorUi(ctk.CTk):
                 return result.stdout.strip()
         return ""
 
+    def _current_update_version(self, source: str) -> str:
+        marker = self._read_update_version_marker()
+        if marker.get("source") == source and marker.get("version"):
+            return str(marker["version"])
+        return read_app_version()
+
     def _read_update_version_marker(self) -> dict[str, str]:
         if not UPDATE_VERSION_PATH.exists():
             return {}
@@ -3447,10 +3485,11 @@ class OperatorUi(ctk.CTk):
             return {}
         return data if isinstance(data, dict) else {}
 
-    def _write_update_version_marker(self, source: str, archive_name: str, commit: str) -> None:
+    def _write_update_version_marker(self, source: str, archive_name: str, commit: str, version: str) -> None:
         data = {
             "source": source,
             "archive": archive_name,
+            "version": version,
             "commit": commit,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
@@ -3588,6 +3627,16 @@ class OperatorUi(ctk.CTk):
         if result.returncode != 0 or not result.stdout.strip():
             raise RuntimeError("Could not check GitHub for updates.")
         return result.stdout.split()[0]
+
+    def _latest_github_version(self, repo: tuple[str, str, str]) -> str:
+        owner, name, branch = repo
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{name}/{branch}/VERSION"
+        try:
+            request = Request(raw_url, headers={"User-Agent": "BaseClaw-Update-Checker"})
+            with urlopen(request, timeout=12) as response:
+                return response.read().decode("utf-8", errors="replace").strip().splitlines()[0].strip()
+        except Exception:
+            return ""
 
     def _looks_like_ssh_source(self, source: str) -> bool:
         return ":" in source and not source.startswith("/") and not source.startswith(("http://", "https://"))
