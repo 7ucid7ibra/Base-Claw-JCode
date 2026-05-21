@@ -18,7 +18,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import customtkinter as ctk
 import psutil
@@ -35,6 +35,7 @@ OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
 UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
+UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]
@@ -837,6 +838,9 @@ class OperatorUi(ctk.CTk):
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.update_button: ctk.CTkButton | None = None
+        self.update_check_running = False
+        self.update_available = False
+        self.update_detail = ""
         self.start_button: ctk.CTkButton | None = None
         self.stop_button: ctk.CTkButton | None = None
         self.restart_button: ctk.CTkButton | None = None
@@ -866,6 +870,7 @@ class OperatorUi(ctk.CTk):
         self.refresh_status()
         self.refresh_chat_history()
         self.after(900, self.send_ui_startup_notice)
+        self.after(2200, self.check_for_updates)
         self.after(5000, self.auto_refresh_status)
 
     @property
@@ -2094,6 +2099,47 @@ class OperatorUi(ctk.CTk):
         self.refresh_status()
         self.after(5000, self.auto_refresh_status)
 
+    def check_for_updates(self) -> None:
+        if self.update_check_running:
+            return
+        self.update_check_running = True
+
+        def worker() -> None:
+            try:
+                available, detail = self._check_update_source()
+            except Exception as exc:
+                available, detail = False, f"Update check failed: {exc}"
+            self.after(0, lambda: self._finish_update_check(available, detail))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check(self, available: bool, detail: str) -> None:
+        self.update_check_running = False
+        self.update_available = available
+        self.update_detail = detail
+        self._refresh_update_button()
+        if available:
+            self.set_status("Update available", detail, None)
+        self.after(30 * 60 * 1000, self.check_for_updates)
+
+    def _refresh_update_button(self) -> None:
+        if not self.update_button:
+            return
+        if self.update_available:
+            self.update_button.configure(
+                text="Update •",
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                text_color=COLORS["accent_text"],
+            )
+        else:
+            self.update_button.configure(
+                text="Update",
+                fg_color=COLORS["panel_lift"],
+                hover_color=COLORS["border"],
+                text_color=COLORS["text"],
+            )
+
     def refresh_log(self) -> None:
         if not self.log_box:
             return
@@ -2891,6 +2937,9 @@ class OperatorUi(ctk.CTk):
         if self.update_button:
             self.update_button.configure(state="normal", text="Update")
         if ok:
+            self.update_available = False
+            self.update_detail = ""
+            self._refresh_update_button()
             self.set_status("Updated", detail, True)
             messagebox.showinfo("Update complete", detail)
         else:
@@ -2913,10 +2962,67 @@ class OperatorUi(ctk.CTk):
                 roots = [item for item in extract_dir.iterdir() if item.is_dir()]
                 source_root = roots[0] if len(roots) == 1 else extract_dir
                 copied = self._overlay_update(source_root)
+                latest_commit = ""
+                github_repo = self._github_repo_from_source(source)
+                if github_repo:
+                    try:
+                        latest_commit = self._latest_github_commit(github_repo)
+                    except Exception:
+                        latest_commit = ""
+                self._write_update_version_marker(source, archive_name, latest_commit)
                 suffix = f" Local git changes were backed up in {backup_detail}." if backup_detail else ""
                 return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code.{suffix}"
         except Exception as exc:
             return False, str(exc)
+
+    def _check_update_source(self) -> tuple[bool, str]:
+        github_repo = self._github_repo_from_source(UPDATE_SOURCE_URL)
+        if not github_repo:
+            return False, "Automatic update checks currently support GitHub update sources."
+        latest = self._latest_github_commit(github_repo)
+        current = self._current_update_commit(UPDATE_SOURCE_URL)
+        if not latest:
+            return False, "Could not read the latest GitHub commit."
+        short_latest = latest[:7]
+        if current and current == latest:
+            return False, f"BaseClaw is current at {short_latest}."
+        if current:
+            return True, f"New BaseClaw update available: {short_latest}."
+        return True, f"BaseClaw update available: {short_latest}."
+
+    def _current_update_commit(self, source: str) -> str:
+        marker = self._read_update_version_marker()
+        if marker.get("source") == source and marker.get("commit"):
+            return str(marker["commit"])
+        if (PROJECT_ROOT / ".git").exists():
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        return ""
+
+    def _read_update_version_marker(self) -> dict[str, str]:
+        if not UPDATE_VERSION_PATH.exists():
+            return {}
+        try:
+            data = json.loads(UPDATE_VERSION_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_update_version_marker(self, source: str, archive_name: str, commit: str) -> None:
+        data = {
+            "source": source,
+            "archive": archive_name,
+            "commit": commit,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        UPDATE_VERSION_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def _backup_git_update_state(self) -> str:
         status = subprocess.run(
@@ -3029,6 +3135,28 @@ class OperatorUi(ctk.CTk):
             raise RuntimeError(f"GitHub update failed. Detail: {detail}")
         return archive_path, f"github:{owner}/{name}@{branch}"
 
+    def _latest_github_commit(self, repo: tuple[str, str, str]) -> str:
+        owner, name, branch = repo
+        api_url = f"https://api.github.com/repos/{owner}/{name}/commits/{branch}"
+        try:
+            request = Request(api_url, headers={"User-Agent": "BaseClaw-Update-Checker"})
+            with urlopen(request, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            sha = str(data.get("sha") or "")
+            if sha:
+                return sha
+        except Exception:
+            pass
+        result = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{owner}/{name}.git", f"refs/heads/{branch}"],
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError("Could not check GitHub for updates.")
+        return result.stdout.split()[0]
+
     def _looks_like_ssh_source(self, source: str) -> bool:
         return ":" in source and not source.startswith("/") and not source.startswith(("http://", "https://"))
 
@@ -3067,6 +3195,7 @@ class OperatorUi(ctk.CTk):
             ".venv-kokoro",
             ".venv-telegram-agent",
             ".baseclaw-install.conf",
+            ".baseclaw-version.json",
             "agent_workspace",
             "profiles",
             "telegram_uploads",

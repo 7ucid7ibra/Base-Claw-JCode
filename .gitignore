@@ -9,6 +9,8 @@ telegram_operator_messages.sqlite3
 telegram_operator_board_ed25519
 telegram_operator_board_known_hosts
 .baseclaw-install.conf
+.baseclaw-version.json
+.local-update-backups/
 *.sqlite3
 *.sqlite3-*
 *.log
