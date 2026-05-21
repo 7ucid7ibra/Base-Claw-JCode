@@ -2482,9 +2482,9 @@ class TelegramCodexOperator:
             "StrictHostKeyChecking=yes",
         ]
 
-    def _board_available(self) -> tuple[bool, str]:
+    def _board_available(self, *, require_poll_enabled: bool = True) -> tuple[bool, str]:
         missing = []
-        if not self.config.board_poll_enabled:
+        if require_poll_enabled and not self.config.board_poll_enabled:
             missing.append("board polling disabled")
         if not self.config.board_remote:
             missing.append("TELEGRAM_OPERATOR_BOARD_REMOTE or TELEGRAM_OPERATOR_HISTORY_REMOTE")
@@ -2534,8 +2534,8 @@ class TelegramCodexOperator:
     def _board_callback_id(self, entry: dict[str, Any]) -> str:
         return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
 
-    def _fetch_board_entries(self) -> list[dict[str, Any]]:
-        available, detail = self._board_available()
+    def _fetch_board_entries(self, *, require_poll_enabled: bool = True) -> list[dict[str, Any]]:
+        available, detail = self._board_available(require_poll_enabled=require_poll_enabled)
         if not available:
             raise RuntimeError(detail)
         remote_command = f"tail -n 80 {shlex.quote(self.config.board_path)}"
@@ -2687,6 +2687,28 @@ class TelegramCodexOperator:
                 body_text,
                 "Meta:",
                 meta_text,
+            ]
+        )
+
+    def _build_manual_board_check_prompt(self, entries: list[dict[str, Any]]) -> str:
+        relevant_entries = [entry for entry in entries if self._board_entry_relevant(entry)]
+        selected_entries = relevant_entries or entries[-12:]
+        compact_entries = [
+            {key: value for key, value in entry.items() if key != "_entry_id"}
+            for entry in selected_entries[-12:]
+        ]
+        entries_text = json.dumps(compact_entries, ensure_ascii=False, indent=2)
+        if len(entries_text) > 8000:
+            entries_text = entries_text[:7997].rstrip() + "..."
+        scope = "relevant entries" if relevant_entries else "most recent entries"
+        return "\n\n".join(
+            [
+                "The user invoked the /pi shortcut to check the shared Raspberry Pi message board now.",
+                f"Review these {scope} from the board.",
+                "Identify anything addressed to this supervisor, this profile, or all supervisors.",
+                "Summarize actionable items clearly. If safe and bounded, proceed with the needed follow-up. Report blockers instead of guessing.",
+                "Board entries:",
+                entries_text or "No board entries were found.",
             ]
         )
 
@@ -3676,6 +3698,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         text = (
             "BaseClaw help menu.\n"
             "Use the buttons below for common operator actions.\n\n"
+            "/pi or /checkpi: check the shared Raspberry Pi board now.\n\n"
             "Board behavior: supervisor-to-supervisor messages should go through targeted shared board entries, so the recipient can handle them with the right context."
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
@@ -3906,6 +3929,33 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
             return
         await self._send_board_poll_status(context, chat_id, event_type="command_board_poll_status_reply")
+
+    async def check_pi_board(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        command_text = update.effective_message.text if update.effective_message else "/pi"
+        self._record_incoming_message(
+            update,
+            event_type="command_pi_board",
+            message_type="command",
+            text=command_text,
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+        try:
+            entries = await asyncio.to_thread(self._fetch_board_entries, require_poll_enabled=False)
+        except Exception as exc:
+            await self._stop_keepalive(keepalive)
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Pi board check failed: {exc}",
+                event_type="command_pi_board_failed",
+            )
+            return
+        prompt = self._build_manual_board_check_prompt(entries)
+        await self._process_user_message(update, context, prompt, keepalive=keepalive)
 
     def _board_poll_status_text(self) -> str:
         return (
@@ -5242,6 +5292,9 @@ async def main() -> None:
     application.add_handler(CommandHandler("voice_off", operator.voice_off))
     application.add_handler(CommandHandler("history_status", operator.history_status))
     application.add_handler(CommandHandler("history_sync", operator.history_sync))
+    application.add_handler(CommandHandler("pi", operator.check_pi_board))
+    application.add_handler(CommandHandler("checkpi", operator.check_pi_board))
+    application.add_handler(CommandHandler("check_pi", operator.check_pi_board))
     application.add_handler(CommandHandler("board_poll_status", operator.board_poll_status))
     application.add_handler(CommandHandler("board_poll_on", operator.board_poll_on))
     application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
