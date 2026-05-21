@@ -166,7 +166,17 @@ DEFAULTS = {
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
 CLAUDE_MODELS = ["", "sonnet", "opus", "claude-sonnet-4-6", "claude-opus-4-6"]
-GEMINI_MODELS = ["", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+GEMINI_FALLBACK_MODELS = [
+    "",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+GEMINI_MODEL_RE = re.compile(r"\bgemini-(?:1\.5|2(?:\.\d+)?|3(?:\.\d+)?)(?:-[a-z0-9]+)*\b")
 JCODE_MODELS = ["qwen3-coder-30b", "qwen/qwen3-coder-30b"]
 PROVIDERS = ["jcode", "codex", "claude", "gemini"]
 CLOUD_HARNESSES = ["codex", "claude", "gemini"]
@@ -456,6 +466,120 @@ def gemini_preflight() -> tuple[bool, str]:
         return True, f"Gemini CLI found: {executable}"
     version = (result.stdout or result.stderr).strip() or "installed"
     return True, f"Gemini CLI: {version}"
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _sort_gemini_models(models: list[str]) -> list[str]:
+    preferred = [
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro",
+        "gemini-3-pro",
+        "gemini-3-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+    ]
+    clean = [model for model in _dedupe_strings(models) if model]
+    preferred_present = [model for model in preferred if model in clean]
+    remaining = sorted(model for model in clean if model not in set(preferred_present))
+    return preferred_present + remaining
+
+
+def _gemini_api_models() -> list[str]:
+    api_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GOOGLE_GENAI_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        return []
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?{urlencode({'key': api_key})}"
+    try:
+        request = Request(url, headers={"Accept": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, json.JSONDecodeError):
+        return []
+    models = []
+    for item in payload.get("models", []):
+        methods = item.get("supportedGenerationMethods") or []
+        if methods and "generateContent" not in methods:
+            continue
+        model_id = str(item.get("name") or item.get("baseModelId") or "").strip()
+        if model_id.startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        if model_id.startswith("gemini-"):
+            models.append(model_id)
+    return models
+
+
+def _gemini_cli_bundle_roots() -> list[Path]:
+    roots: list[Path] = []
+    executable = shutil.which("gemini")
+    if executable:
+        try:
+            resolved = Path(executable).resolve()
+            roots.extend(parent / "node_modules" / "@google" / "gemini-cli" for parent in resolved.parents[:5])
+            roots.extend(parent / "@google" / "gemini-cli" for parent in resolved.parents[:5])
+        except OSError:
+            pass
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            result = subprocess.run(
+                [npm, "root", "-g"],
+                text=True,
+                capture_output=True,
+                timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            result = None
+        if result and result.returncode == 0:
+            npm_root_text = (result.stdout or "").strip()
+            if npm_root_text:
+                roots.append(Path(npm_root_text) / "@google" / "gemini-cli")
+    return [Path(root) for root in _dedupe_strings([str(root) for root in roots]) if Path(root).exists()]
+
+
+def _gemini_cli_bundle_models() -> list[str]:
+    models: list[str] = []
+    for root_text in _gemini_cli_bundle_roots():
+        root = Path(root_text)
+        search_roots = [root / "bundle", root / "dist", root]
+        for search_root in search_roots:
+            if not search_root.exists():
+                continue
+            for path in search_root.rglob("*.js"):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for model_id in GEMINI_MODEL_RE.findall(text):
+                    if "9001" in model_id or model_id.endswith("-base"):
+                        continue
+                    models.append(model_id)
+    return models
+
+
+def gemini_model_options() -> list[str]:
+    discovered = _sort_gemini_models([*_gemini_api_models(), *_gemini_cli_bundle_models()])
+    return ["", *(discovered or [model for model in GEMINI_FALLBACK_MODELS if model])]
 
 
 def normalize_speech_url(url: str) -> str:
@@ -1751,7 +1875,7 @@ class OperatorUi(ctk.CTk):
         elif provider == "claude":
             options = CLAUDE_MODELS
         elif provider == "gemini":
-            options = GEMINI_MODELS
+            options = gemini_model_options()
         else:
             options = ["", *JCODE_MODELS, *CODEX_MODELS]
         return options if model in options else [model, *options]
