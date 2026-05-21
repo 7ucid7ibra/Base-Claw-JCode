@@ -3316,6 +3316,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             "Voice-friendly reply rule: prefer plain conversational text. Avoid decorative Markdown such as bold/italic markers unless necessary. Do not quote long file paths, long numbers, long commands, logs, or code blocks in normal spoken replies; summarize them and include only short labels or essential names. If exact paths, commands, or code are needed, put them after a short spoken summary and keep them minimal.",
             "Telegram send guardrail: never call Telegram Bot API methods, curl, requests, bot tokens, or external Telegram scripts yourself to send messages or files. Do not read or use TELEGRAM_BOT_TOKEN values for sending. To send a file to the user, create it under the current profile workspace or an allowed path and include a final line exactly like `BASECLAW_SEND_FILE: /absolute/path/to/file`. The bridge will upload that file through this profile's own bot token to this same chat.",
+            "Attachment context guardrail: the prompt may include internal attachment metadata such as local paths, file counts, dimensions, or saved-file notices. Use that context silently to inspect files. Do not echo upload confirmations, local paths, dimensions, file counts, or phrases like 'Telegram photo received' back to the user unless the user explicitly asks for technical attachment details.",
             f"Telegram sender: {telegram_user}",
             "Loaded supervisor identity:",
             self._identity_prompt_block(),
@@ -4206,10 +4207,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             body = "\n\n".join(
                 [
                     update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "<internal_attachment_context>",
                     "PDF attachment received.",
                     f"Filename: {filename}",
                     f"Saved locally as: {pdf_path}",
                     f"Extracted characters: {extracted_chars}",
+                    "</internal_attachment_context>",
                     "Extracted PDF text:",
                     extracted_text,
                 ]
@@ -4218,10 +4221,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             body = "\n\n".join(
                 [
                     update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "<internal_attachment_context>",
                     "PDF attachment received, but no selectable text could be extracted.",
                     f"Filename: {filename}",
                     f"Saved locally as: {pdf_path}",
                     "This PDF likely needs OCR or vision analysis.",
+                    "</internal_attachment_context>",
                 ]
             )
         await self._process_user_message(update, context, body, keepalive=keepalive)
@@ -4327,9 +4332,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         body = "\n\n".join(
             [
                 caption or "Please process this Telegram video attachment.",
+                "<internal_attachment_context>",
                 "Telegram video received.",
                 "\n".join(details),
                 "Preserve the original file and use a working copy for edits.",
+                "</internal_attachment_context>",
             ]
         )
         await self._process_user_message(update, context, body, keepalive=keepalive)
@@ -4495,10 +4502,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
         body_parts = [
             caption or "Please look at these screenshot attachments and respond to them.",
+            "<internal_attachment_context>",
             f"{'Telegram photo album' if len(images) > 1 else 'Telegram photo'} received.",
             f"Saved image count: {len(images)}",
             "Saved locally as:",
             "\n".join(image_lines),
+            "</internal_attachment_context>",
         ]
         await self._process_user_message(representative, context, "\n\n".join(body_parts), keepalive=keepalive)
 
