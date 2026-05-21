@@ -3030,6 +3030,9 @@ class OperatorUi(ctk.CTk):
         self.after(1500, self.refresh_status)
 
     def _kill_operator_processes(self, *, show_errors: bool = True) -> None:
+        self._kill_operator_processes_for_env(self.env_path, show_errors=show_errors)
+
+    def _kill_operator_processes_for_env(self, profile_env: Path, *, show_errors: bool = True) -> None:
         def kill_items(items: list[dict]) -> None:
             for item in items:
                 try:
@@ -3038,13 +3041,51 @@ class OperatorUi(ctk.CTk):
                     if show_errors:
                         messagebox.showerror("Stop failed", str(exc))
 
-        processes = operator_processes(self.env_path)
+        processes = operator_processes(profile_env)
         supervisors = [item for item in processes if SUPERVISOR_SCRIPT.name in item.get("CommandLine", "")]
         workers = [item for item in processes if item not in supervisors]
         kill_items(supervisors)
         kill_items(workers)
         time.sleep(0.4)
-        kill_items(operator_processes(self.env_path))
+        kill_items(operator_processes(profile_env))
+
+    def _running_operator_profiles(self) -> list[str]:
+        return [profile for profile in list_profiles() if root_operator_processes(profile_env_path(profile))]
+
+    def _start_operator_process_for_profile(self, profile: str) -> None:
+        profile_env = profile_env_path(profile)
+        values = self._profile_values(profile)
+        Path(values["TELEGRAM_OPERATOR_WORKDIR"]).mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        env["BASECLAW_OPERATOR_ENV_PATH"] = str(profile_env)
+        if sys.platform.startswith("win"):
+            powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+            subprocess.Popen(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT), "-ProfileEnv", str(profile_env)],
+                cwd=str(BASE_DIR),
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, str(OPERATOR_SCRIPT), "--profile-env", str(profile_env)],
+                cwd=str(BASE_DIR),
+                env=env,
+                start_new_session=True,
+            )
+
+    def _restart_operator_profiles(self, profiles: list[str]) -> tuple[int, list[str]]:
+        restarted: list[str] = []
+        failed: list[str] = []
+        for profile in profiles:
+            profile_env = profile_env_path(profile)
+            try:
+                self._kill_operator_processes_for_env(profile_env, show_errors=False)
+                self._start_operator_process_for_profile(profile)
+                restarted.append(profile)
+            except Exception:
+                failed.append(profile)
+        return len(restarted), failed
 
     def stop_operator(self) -> None:
         self.set_status("Stopping", "Stopping operator...", None)
@@ -3059,9 +3100,10 @@ class OperatorUi(ctk.CTk):
     def update_from_source(self) -> None:
         self.save(show_message=False)
         source = UPDATE_SOURCE_URL
+        running_profiles = self._running_operator_profiles()
         if not messagebox.askyesno(
             "Update BaseClaw",
-            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nRestart the UI manually after it finishes.",
+            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nAfter a successful update, BaseClaw will restart {len(running_profiles)} running operator profile(s).",
         ):
             return
         if self.update_button:
@@ -3070,21 +3112,27 @@ class OperatorUi(ctk.CTk):
 
         def worker() -> None:
             ok, detail = self._pull_archive_update(source)
-            self.after(0, lambda: self._finish_update(ok, detail))
+            self.after(0, lambda: self._finish_update(ok, detail, running_profiles))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_update(self, ok: bool, detail: str) -> None:
+    def _finish_update(self, ok: bool, detail: str, running_profiles: list[str]) -> None:
         if self.update_button:
             self.update_button.configure(state="normal", text="Update")
         if ok:
+            restart_detail = ""
+            if running_profiles:
+                restarted, failed = self._restart_operator_profiles(running_profiles)
+                restart_detail = f" Restarted {restarted} operator profile(s)."
+                if failed:
+                    restart_detail += f" Failed to restart: {', '.join(failed)}."
             self.update_available = False
             self.update_detail = ""
             self._refresh_update_button()
-            self.set_status("Updated", detail, True)
+            self.set_status("Updated", detail + restart_detail, True)
             restart = messagebox.askyesno(
                 "Update complete",
-                f"{detail}\n\nRestart the BaseClaw UI now to load the updated interface? The Telegram operator process will keep running.",
+                f"{detail}{restart_detail}\n\nRestart the BaseClaw UI now to load the updated interface?",
             )
             if restart:
                 self.restart_ui_process()
