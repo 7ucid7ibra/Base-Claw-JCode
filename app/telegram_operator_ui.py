@@ -1578,6 +1578,25 @@ class OperatorUi(ctk.CTk):
             existing.append(directory)
         current.set("; ".join(existing))
 
+    def remove_allowed_path(self) -> None:
+        current = self.vars.get("TELEGRAM_OPERATOR_ALLOWED_PATHS")
+        if current is None:
+            return
+        existing = [part.strip() for part in current.get().split(";") if part.strip()]
+        if not existing:
+            self.set_status("No paths", "There are no additional allowed paths to remove.", None)
+            return
+        if len(existing) == 1:
+            removed = existing.pop()
+        else:
+            prompt = "Number to remove:\n\n" + "\n".join(f"{index + 1}. {path}" for index, path in enumerate(existing))
+            index = simpledialog.askinteger("Remove allowed path", prompt, minvalue=1, maxvalue=len(existing), parent=self)
+            if index is None:
+                return
+            removed = existing.pop(index - 1)
+        current.set("; ".join(existing))
+        self.set_status("Path removed", f"Removed allowed path: {removed}", None)
+
     def on_run_mode_selected(self, _value: str | None = None) -> None:
         mode = run_mode_value(self.vars["TELEGRAM_OPERATOR_RUN_MODE"].get())
         self.vars["TELEGRAM_OPERATOR_RUN_MODE"].set(run_mode_display(mode))
@@ -1637,6 +1656,9 @@ class OperatorUi(ctk.CTk):
         )
         ctk.CTkButton(line, text="Add Path", width=92, height=38, corner_radius=10, command=self.choose_allowed_path).grid(
             row=0, column=1, padx=(8, 0)
+        )
+        ctk.CTkButton(line, text="Remove", width=82, height=38, corner_radius=10, command=self.remove_allowed_path).grid(
+            row=0, column=2, padx=(8, 0)
         )
 
     def on_provider_selected(self, _value: str | None = None) -> None:
