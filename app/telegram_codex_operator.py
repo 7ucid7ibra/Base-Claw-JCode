@@ -3121,31 +3121,50 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         self.message_store.mark_history_synced(local_ids, sync_source="pi_shared_history")
         return summary
 
-    async def _send_voice_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+    async def _send_voice_reply(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        text: str,
+        *,
+        caption: Optional[str] = None,
+    ) -> None:
         if not self.config.voice_replies_enabled:
             return
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
-            ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, Path(tmp))
-            caption = text if len(text) <= 900 else text[:897].rstrip() + "..."
-            try:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-            except Exception as exc:
-                LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
-            with ogg_path.open("rb") as handle:
-                sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+            tmp_path = Path(tmp)
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    if attempt > 1:
+                        await asyncio.sleep(1.2 * (attempt - 1))
+                    ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, tmp_path)
+                    try:
+                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+                    except Exception as exc:
+                        LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
+                    with ogg_path.open("rb") as handle:
+                        sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    LOGGER.warning("Voice reply attempt failed chat_id=%s attempt=%s error=%s", chat_id, attempt, exc)
+            else:
+                raise last_error or RuntimeError("voice reply failed")
             self.message_store.append(
                 direction="out",
                 event_type="outgoing_voice_reply",
                 chat_id=chat_id,
                 telegram_message_id=sent.message_id,
                 message_type="voice",
-                text=caption,
+                text=caption or "",
                 safe_mode=self.config.safe_mode,
                 metadata={
                     "source_text": text,
                     "caption": caption,
                     "voice_duration": getattr(sent.voice, "duration", None) if sent.voice else None,
                     "voice_file_id": getattr(sent.voice, "file_id", None) if sent.voice else None,
+                    "attempts": attempt,
                 },
             )
 
@@ -3168,8 +3187,15 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self.config.voice_replies_enabled:
             await self._send_text_chunks(context, chat_id, text)
             return
+        if len(text) > 900:
+            await self._send_text_chunks(context, chat_id, text)
+            try:
+                await self._send_voice_reply(context, chat_id, text, caption=None)
+            except Exception:
+                LOGGER.exception("Voice reply failed after text delivery chat_id=%s", chat_id)
+            return
         try:
-            await self._send_voice_reply(context, chat_id, text)
+            await self._send_voice_reply(context, chat_id, text, caption=text)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
             voice_error = friendly_voice_error(exc)
@@ -3180,7 +3206,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             )
             await self._send_text_chunks(context, chat_id, fallback)
         else:
-            if always_send_text or len(text) > 900:
+            if always_send_text:
                 await self._send_text_chunks(context, chat_id, text)
 
     def _extract_file_send_directives(self, text: str) -> tuple[str, list[Path]]:
