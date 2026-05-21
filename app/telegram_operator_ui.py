@@ -35,8 +35,46 @@ MAIN_PROFILE = "main"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
-UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
 UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
+DEFAULT_UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
+
+
+def _unquote_config_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _install_config_value(*keys: str) -> str:
+    config_path = PROJECT_ROOT / ".baseclaw-install.conf"
+    if not config_path.exists():
+        return ""
+    wanted = set(keys)
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() in wanted:
+            return _unquote_config_value(value)
+    return ""
+
+
+def configured_update_source_url() -> str:
+    return (
+        os.environ.get("BASECLAW_UPDATE_SOURCE_URL", "").strip()
+        or os.environ.get("BASECLAW_UPDATE_SOURCE", "").strip()
+        or _install_config_value("BASECLAW_UPDATE_SOURCE_URL", "BASECLAW_UPDATE_SOURCE")
+        or DEFAULT_UPDATE_SOURCE_URL
+    )
+
+
+UPDATE_SOURCE_URL = configured_update_source_url()
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]

@@ -65,6 +65,7 @@ fi
 if [[ -z "$WITH_KOKORO" && "${BASECLAW_WITH_KOKORO:-}" =~ ^[01]$ ]]; then
   WITH_KOKORO="$BASECLAW_WITH_KOKORO"
 fi
+BASECLAW_UPDATE_SOURCE_URL="${BASECLAW_UPDATE_SOURCE_URL:-}"
 
 say() {
   printf '\n%s\n' "$*"
@@ -305,6 +306,9 @@ write_install_config() {
 # Re-run ./install.sh --setup to change optional install choices.
 BASECLAW_WITH_KOKORO=$kokoro
 EOF
+  if [[ -n "${BASECLAW_UPDATE_SOURCE_URL:-}" ]]; then
+    printf 'BASECLAW_UPDATE_SOURCE_URL=%q\n' "$BASECLAW_UPDATE_SOURCE_URL" >> "$CONFIG_PATH"
+  fi
 }
 
 install_macos_launcher() {
