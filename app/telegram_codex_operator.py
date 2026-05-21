@@ -68,6 +68,7 @@ CODEX_FINAL_MESSAGE_GRACE_SECONDS = 8.0
 STATUS_UPDATE_INITIAL_DELAY_SECONDS = 120
 STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
+VOICE_CAPTION_MAX_CHARS = 999
 PDF_EXTRACT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
@@ -2862,7 +2863,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self.config.voice_replies_enabled:
             await self._send_text_chunks(context, chat_id, text)
             return
-        if len(text) > 900:
+        if len(text) > VOICE_CAPTION_MAX_CHARS:
             await self._send_text_chunks(context, chat_id, text)
             try:
                 await self._send_voice_reply(context, chat_id, text, caption=None)
