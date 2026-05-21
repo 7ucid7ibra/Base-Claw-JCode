@@ -16,6 +16,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
+from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -2941,10 +2942,33 @@ class OperatorUi(ctk.CTk):
             self.update_detail = ""
             self._refresh_update_button()
             self.set_status("Updated", detail, True)
-            messagebox.showinfo("Update complete", detail)
+            restart = messagebox.askyesno(
+                "Update complete",
+                f"{detail}\n\nRestart the BaseClaw UI now to load the updated interface? The Telegram operator process will keep running.",
+            )
+            if restart:
+                self.restart_ui_process()
         else:
             self.set_status("Update failed", detail, False)
             messagebox.showerror("Update failed", detail)
+
+    def restart_ui_process(self) -> None:
+        self.save(show_message=False)
+        env = dict(os.environ)
+        env["BASECLAW_OPERATOR_ENV_PATH"] = str(self.env_path)
+        kwargs: dict[str, Any] = {
+            "cwd": str(BASE_DIR),
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform.startswith("win"):
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, str(APP_DIR / "telegram_operator_ui.py")], **kwargs)
+        self.destroy()
 
     def _pull_archive_update(self, source: str) -> tuple[bool, str]:
         try:
