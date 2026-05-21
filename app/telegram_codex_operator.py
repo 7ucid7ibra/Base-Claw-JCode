@@ -60,6 +60,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 LOGGER = logging.getLogger("telegram_codex_operator")
+BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 SPEECH_CONNECT_TIMEOUT_SECONDS = 4
 SPEECH_READ_TIMEOUT_SECONDS = 300
 SPEECH_REQUEST_TIMEOUT = (SPEECH_CONNECT_TIMEOUT_SECONDS, SPEECH_READ_TIMEOUT_SECONDS)
@@ -83,6 +84,21 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def normalize_bot_token(value: str) -> str:
+    token = re.sub(r"\s+", "", value.strip())
+    half = len(token) // 2
+    if len(token) % 2 == 0 and half and token[:half] == token[half:] and BOT_TOKEN_RE.fullmatch(token[:half]):
+        return token[:half]
+    return token
+
+
+def require_bot_token() -> str:
+    token = normalize_bot_token(require_env("TELEGRAM_BOT_TOKEN"))
+    if not BOT_TOKEN_RE.fullmatch(token):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN looks invalid. Paste exactly one token from BotFather; do not paste it twice.")
+    return token
 
 
 def parse_allowed_chat_ids(raw: str) -> set[int]:
@@ -5096,7 +5112,7 @@ def load_config() -> OperatorConfig:
         llm_port = "11434" if jcode_provider_id == "ollama" else "1234"
         jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
-        bot_token=require_env("TELEGRAM_BOT_TOKEN"),
+        bot_token=require_bot_token(),
         allowed_chat_ids=parse_allowed_chat_ids(require_env("TELEGRAM_ALLOWED_CHAT_IDS")),
         workdir=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_WORKDIR", ""), DEFAULT_WORKSPACE),
         access_scope=access_scope,

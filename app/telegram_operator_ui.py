@@ -38,6 +38,7 @@ UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]
+BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
 ENV_KEYS = [
     "TELEGRAM_BOT_TOKEN",
@@ -350,6 +351,23 @@ def write_env(path: Path, values: dict[str, str]) -> None:
         if key not in seen:
             lines.append(f"{key}={values.get(key, '')}")
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def normalize_bot_token(value: str) -> str:
+    token = re.sub(r"\s+", "", value.strip())
+    half = len(token) // 2
+    if len(token) % 2 == 0 and half and token[:half] == token[half:] and BOT_TOKEN_RE.fullmatch(token[:half]):
+        return token[:half]
+    return token
+
+
+def bot_token_validation_error(value: str) -> str:
+    token = normalize_bot_token(value)
+    if not token:
+        return "Bot token is missing. Paste one token from BotFather before starting this profile."
+    if not BOT_TOKEN_RE.fullmatch(token):
+        return "Bot token looks invalid. Paste exactly one token from BotFather; do not paste it twice."
+    return ""
 
 
 def redact_secrets(text: str) -> str:
@@ -1786,6 +1804,7 @@ class OperatorUi(ctk.CTk):
         values = read_env(self.env_path)
         for key, var in self.vars.items():
             values[key] = var.get().strip()
+        values["TELEGRAM_BOT_TOKEN"] = normalize_bot_token(values.get("TELEGRAM_BOT_TOKEN", ""))
         values["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = language_code(
             values.get("TELEGRAM_OPERATOR_KOKORO_LANG_CODE", "")
         )
@@ -2755,6 +2774,12 @@ class OperatorUi(ctk.CTk):
     def start_operator(self) -> None:
         self.save(show_message=False)
         values = self.current_values()
+        token_error = bot_token_validation_error(values.get("TELEGRAM_BOT_TOKEN", ""))
+        if token_error:
+            write_env(self.env_path, values)
+            self.set_status("Token invalid", token_error, False)
+            messagebox.showerror("Telegram token invalid", token_error)
+            return
         Path(values["TELEGRAM_OPERATOR_WORKDIR"]).mkdir(parents=True, exist_ok=True)
         provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower()
         if provider == "jcode":
