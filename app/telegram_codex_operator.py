@@ -416,8 +416,6 @@ class OperatorConfig:
     history_sync_limit: int
     history_auto_sync_enabled: bool
     history_auto_sync_interval_seconds: int
-    board_poll_enabled: bool
-    board_poll_interval_seconds: int
     board_remote: str
     board_path: str
     board_state_path: Path
@@ -1900,8 +1898,6 @@ class TelegramCodexOperator:
         self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.pending_manual_updates: Dict[int, str] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
-        self.board_poll_loop_active = False
-        self.board_poll_loop_inactive_reason = "not started"
 
     def _local_memory_gb(self) -> Optional[float]:
         if platform.system().lower() != "windows":
@@ -2482,10 +2478,8 @@ class TelegramCodexOperator:
             "StrictHostKeyChecking=yes",
         ]
 
-    def _board_available(self, *, require_poll_enabled: bool = True) -> tuple[bool, str]:
+    def _board_available(self) -> tuple[bool, str]:
         missing = []
-        if require_poll_enabled and not self.config.board_poll_enabled:
-            missing.append("board polling disabled")
         if not self.config.board_remote:
             missing.append("TELEGRAM_OPERATOR_BOARD_REMOTE or TELEGRAM_OPERATOR_HISTORY_REMOTE")
         if not self.config.board_path:
@@ -2534,8 +2528,8 @@ class TelegramCodexOperator:
     def _board_callback_id(self, entry: dict[str, Any]) -> str:
         return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
 
-    def _fetch_board_entries(self, *, require_poll_enabled: bool = True) -> list[dict[str, Any]]:
-        available, detail = self._board_available(require_poll_enabled=require_poll_enabled)
+    def _fetch_board_entries(self) -> list[dict[str, Any]]:
+        available, detail = self._board_available()
         if not available:
             raise RuntimeError(detail)
         remote_command = f"tail -n 80 {shlex.quote(self.config.board_path)}"
@@ -2907,63 +2901,6 @@ class TelegramCodexOperator:
             text=self._format_source_update_card(entry)[:3900],
             reply_markup=keyboard,
         )
-
-    async def board_poll_loop(self, application: Application) -> None:
-        available, detail = self._board_available()
-        if not available:
-            LOGGER.info("Board polling not active: %s", detail)
-            self.board_poll_loop_active = False
-            self.board_poll_loop_inactive_reason = detail
-            return
-        self.board_poll_loop_active = True
-        self.board_poll_loop_inactive_reason = ""
-        while True:
-            if not self.config.board_poll_enabled:
-                await asyncio.sleep(self.config.board_poll_interval_seconds)
-                continue
-            try:
-                entries = await asyncio.to_thread(self._fetch_board_entries)
-                state = await asyncio.to_thread(self._load_board_state)
-                seen = set(state.get("seen", []))
-                current_ids = [entry["_entry_id"] for entry in entries]
-                if not state.get("initialized"):
-                    state["initialized"] = True
-                    state["seen"] = current_ids
-                    await asyncio.to_thread(self._save_board_state, state)
-                    LOGGER.info("Board polling initialized seen=%s", len(current_ids))
-                else:
-                    new_relevant = [
-                        entry
-                        for entry in entries
-                        if entry["_entry_id"] not in seen and self._board_entry_relevant(entry)
-                    ]
-                    if new_relevant:
-                        new_relevant_ids = {entry["_entry_id"] for entry in new_relevant}
-                        delivered_ids: set[str] = set()
-                        for entry in new_relevant:
-                            delivered = False
-                            for chat_id in self.config.allowed_chat_ids:
-                                try:
-                                    if str(entry.get("type") or "").strip() == "source_baseline_update":
-                                        await self._send_source_update_card(application, chat_id, entry)
-                                    else:
-                                        await self._send_board_entry_card(application, chat_id, entry)
-                                    delivered = True
-                                except Exception:
-                                    LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
-                            if delivered:
-                                delivered_ids.add(entry["_entry_id"])
-                        safe_seen_ids = (set(current_ids) - new_relevant_ids).union(delivered_ids)
-                        state["seen"] = list(seen.union(safe_seen_ids))
-                        await asyncio.to_thread(self._save_board_state, state)
-                    elif current_ids:
-                        state["seen"] = list(seen.union(current_ids))
-                        await asyncio.to_thread(self._save_board_state, state)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                LOGGER.warning("Board polling failed: %s", exc)
-            await asyncio.sleep(self.config.board_poll_interval_seconds)
 
     async def history_auto_sync_loop(self) -> None:
         if not self.config.history_auto_sync_enabled:
@@ -3641,7 +3578,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
             f"Voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
             f"Local speech fallback: {self.config.local_speech_fallback}\n"
-            f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}\n"
+            f"Pi board: manual /pi check\n"
             f"History auto-sync: {'on' if self.config.history_auto_sync_enabled else 'off'}"
         )
 
@@ -3684,10 +3621,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                     InlineKeyboardButton("History status", callback_data="menu:history_status"),
                     InlineKeyboardButton("Sync history", callback_data="menu:history_sync"),
                 ],
-                [
-                    InlineKeyboardButton("Board status", callback_data="menu:board_status"),
-                    InlineKeyboardButton("Voice status", callback_data="menu:voice_status"),
-                ],
+                [InlineKeyboardButton("Voice status", callback_data="menu:voice_status")],
                 [
                     InlineKeyboardButton("Restart", callback_data="menu:restart"),
                     InlineKeyboardButton("Reset session", callback_data="menu:reset"),
@@ -3917,19 +3851,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Remote DB: {result.get('remote_db', self.config.history_remote_db_path)}"
         )
 
-    async def board_poll_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_board_poll_status",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/board_poll_status",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        await self._send_board_poll_status(context, chat_id, event_type="command_board_poll_status_reply")
-
     async def check_pi_board(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
         command_text = update.effective_message.text if update.effective_message else "/pi"
@@ -3944,7 +3865,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
         try:
-            entries = await asyncio.to_thread(self._fetch_board_entries, require_poll_enabled=False)
+            entries = await asyncio.to_thread(self._fetch_board_entries)
         except Exception as exc:
             await self._stop_keepalive(keepalive)
             await self._send_text_message(
@@ -3956,82 +3877,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         prompt = self._build_manual_board_check_prompt(entries)
         await self._process_user_message(update, context, prompt, keepalive=keepalive)
-
-    def _board_poll_status_text(self) -> str:
-        return (
-            f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
-            f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
-            f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
-            f"Board: {self.config.board_remote} {self.config.board_path}"
-        )
-
-    def _board_poll_controls(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Board polling on", callback_data="menu:board_poll_on"),
-                    InlineKeyboardButton("Board polling off", callback_data="menu:board_poll_off"),
-                ]
-            ]
-        )
-
-    async def _send_board_poll_status(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
-        *,
-        event_type: str,
-    ) -> None:
-        await self._send_text_message(
-            context,
-            chat_id,
-            self._board_poll_status_text(),
-            event_type=event_type,
-            reply_markup=self._board_poll_controls(),
-        )
-
-    async def board_poll_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._set_board_poll(update, context, enabled=True)
-
-    async def board_poll_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._set_board_poll(update, context, enabled=False)
-
-    async def _set_board_poll(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_board_poll_on" if enabled else "command_board_poll_off",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else ("/board_poll_on" if enabled else "/board_poll_off"),
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        restart_note = await self._set_board_poll_enabled(enabled)
-        await self._send_text_message(
-            context,
-            chat_id,
-            f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
-            event_type="command_board_poll_toggle_reply",
-        )
-
-    async def _set_board_poll_enabled(self, enabled: bool) -> str:
-        was_enabled = self.config.board_poll_enabled
-        self.config.board_poll_enabled = enabled
-        await asyncio.to_thread(
-            update_operator_env,
-            {"TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true" if enabled else "false"},
-        )
-        if self.board_poll_loop_active:
-            restart_note = "The running polling loop will use this setting on its next interval."
-        else:
-            reason = f" Reason: {self.board_poll_loop_inactive_reason}." if self.board_poll_loop_inactive_reason else ""
-            restart_note = f"The setting is saved, but the polling loop is not active in this process.{reason} Restart after fixing board access."
-        if was_enabled and not enabled:
-            restart_note = "This disables future polling checks in the running process and is saved for restart."
-        elif not was_enabled and enabled and self.board_poll_loop_active:
-            restart_note = "This enables polling in the running process; the loop will check again on its next interval."
-        return restart_note
 
     async def update_from_pi(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -4848,20 +4693,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 text = f"History sync failed: {exc}"
             await self._send_text_message(context, chat_id, text, event_type="menu_history_sync_reply")
             return
-        if action == "board_status":
-            await self._send_board_poll_status(context, chat_id, event_type="menu_board_status_reply")
-            return
-        if action in {"board_poll_on", "board_poll_off"}:
-            enabled = action == "board_poll_on"
-            restart_note = await self._set_board_poll_enabled(enabled)
-            await self._send_text_message(
-                context,
-                chat_id,
-                f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}\n\n{self._board_poll_status_text()}",
-                event_type="menu_board_poll_toggle_reply",
-                reply_markup=self._board_poll_controls(),
-            )
-            return
         if action == "voice_status":
             await self._send_text_message(
                 context,
@@ -5240,8 +5071,6 @@ def load_config() -> OperatorConfig:
             os.environ.get("TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS", ""),
             300,
         ),
-        board_poll_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", ""), True),
-        board_poll_interval_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS", ""), 180),
         board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
         board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "").strip(),
         board_state_path=resolve_app_path(
@@ -5295,9 +5124,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("pi", operator.check_pi_board))
     application.add_handler(CommandHandler("checkpi", operator.check_pi_board))
     application.add_handler(CommandHandler("check_pi", operator.check_pi_board))
-    application.add_handler(CommandHandler("board_poll_status", operator.board_poll_status))
-    application.add_handler(CommandHandler("board_poll_on", operator.board_poll_on))
-    application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
     application.add_handler(CommandHandler("update", operator.update_from_pi))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
@@ -5316,7 +5142,6 @@ async def main() -> None:
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-    board_task = asyncio.create_task(operator.board_poll_loop(application))
     history_sync_task = asyncio.create_task(operator.history_auto_sync_loop())
     if config.startup_notice:
         for chat_id in config.allowed_chat_ids:
@@ -5330,12 +5155,7 @@ async def main() -> None:
     try:
         await asyncio.Event().wait()
     finally:
-        board_task.cancel()
         history_sync_task.cancel()
-        try:
-            await board_task
-        except asyncio.CancelledError:
-            pass
         try:
             await history_sync_task
         except asyncio.CancelledError:
