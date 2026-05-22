@@ -229,6 +229,36 @@ JCODE_MODELS = ["qwen3-coder-30b", "qwen/qwen3-coder-30b"]
 PROVIDERS = ["jcode", "codex", "claude", "gemini"]
 CLOUD_HARNESSES = ["codex", "claude", "gemini"]
 LOCAL_HARNESSES = ["jcode"]
+DEFAULT_KOKORO_VOICES = [
+    "af_alloy",
+    "af_aoede",
+    "af_bella",
+    "af_heart",
+    "af_jessica",
+    "af_kore",
+    "af_nicole",
+    "af_nova",
+    "af_river",
+    "af_sarah",
+    "af_sky",
+    "am_adam",
+    "am_echo",
+    "am_eric",
+    "am_fenrir",
+    "am_liam",
+    "am_michael",
+    "am_onyx",
+    "am_puck",
+    "am_santa",
+    "bf_alice",
+    "bf_emma",
+    "bf_isabella",
+    "bf_lily",
+    "bm_daniel",
+    "bm_fable",
+    "bm_george",
+    "bm_lewis",
+]
 RUN_MODE_LABELS = {
     "local": "Local mode",
     "cloud": "Cloud provider mode",
@@ -514,6 +544,38 @@ def gemini_preflight() -> tuple[bool, str]:
         return True, f"Gemini CLI found: {executable}"
     version = (result.stdout or result.stderr).strip() or "installed"
     return True, f"Gemini CLI: {version}"
+
+
+def provider_available(provider: str) -> bool:
+    provider = provider.strip().lower()
+    if provider == "jcode":
+        return shutil.which("jcode") is not None
+    if provider == "codex":
+        try:
+            resolve_codex_command()
+            return True
+        except Exception:
+            return False
+    if provider == "claude":
+        return shutil.which("claude") is not None
+    if provider == "gemini":
+        return shutil.which("gemini") is not None
+    return False
+
+
+def preferred_available_provider(preferred: str = "") -> str:
+    preferred = preferred.strip().lower()
+    if preferred in PROVIDERS and provider_available(preferred):
+        return preferred
+    for provider in ("codex", "gemini", "claude", "jcode"):
+        if provider_available(provider):
+            return provider
+    return preferred if preferred in PROVIDERS else "codex"
+
+
+def provider_run_mode(provider: str) -> str:
+    provider = provider.strip().lower()
+    return "cloud" if provider in CLOUD_HARNESSES else "local"
 
 
 def _dedupe_strings(values: list[str]) -> list[str]:
@@ -1136,6 +1198,7 @@ class OperatorUi(ctk.CTk):
         self.settings_button: ctk.CTkButton | None = None
         self.settings_window: ctk.CTkToplevel | None = None
         self.settings_frame: ctk.CTkScrollableFrame | None = None
+        self.active_scroll_canvas: tk.Canvas | None = None
         self.settings_visible = False
         self.last_chat_row_id = -1
         self.chat_busy = False
@@ -1143,6 +1206,9 @@ class OperatorUi(ctk.CTk):
         self.autosave_after_id: str | None = None
         self.entry_labels: dict[str, ctk.CTkLabel] = {}
         self.tooltips: list[Tooltip] = []
+        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self._wire_autosave()
@@ -1384,12 +1450,10 @@ class OperatorUi(ctk.CTk):
         self.llm_port_label = self.entry_labels.get("TELEGRAM_OPERATOR_LLM_PORT")
 
         agent = self._card(settings_body, "Agent", "Harness, model provider, workspace, and safety controls.", 3, 0)
-        provider = self.values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
-        if provider not in PROVIDERS:
-            provider = "jcode"
+        provider = preferred_available_provider(self.values.get("TELEGRAM_OPERATOR_PROVIDER", ""))
         run_mode = self.values.get("TELEGRAM_OPERATOR_RUN_MODE", "").strip()
-        if not run_mode:
-            run_mode = "cloud" if provider in CLOUD_HARNESSES else "local"
+        if not run_mode or (provider != "jcode" and run_mode == "local"):
+            run_mode = provider_run_mode(provider)
         model_provider = self.values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip() or "lmstudio"
         self.vars["TELEGRAM_OPERATOR_RUN_MODE"] = tk.StringVar(value=run_mode_display(run_mode))
         self.vars["TELEGRAM_OPERATOR_MODEL_PROVIDER"] = tk.StringVar(value=model_provider_display(model_provider))
@@ -1734,6 +1798,7 @@ class OperatorUi(ctk.CTk):
                 self.settings_button.configure(text="Settings")
 
     def _configure_scrollable_background(self, frame: ctk.CTkScrollableFrame) -> None:
+        canvas = getattr(frame, "_parent_canvas", None)
         for attr in ("_parent_canvas",):
             canvas = getattr(frame, attr, None)
             if canvas is not None:
@@ -1747,6 +1812,42 @@ class OperatorUi(ctk.CTk):
                 parent_frame.configure(fg_color=COLORS["bg"], border_color=COLORS["bg"])
             except tk.TclError:
                 pass
+        if canvas is not None:
+            targets = [canvas]
+            if parent_frame is not None:
+                targets.append(parent_frame)
+            for target in targets:
+                target.bind("<Enter>", lambda _event, scroll_canvas=canvas: self._set_active_scroll_canvas(scroll_canvas), add="+")
+                target.bind("<Leave>", lambda _event, scroll_canvas=canvas: self._clear_active_scroll_canvas(scroll_canvas), add="+")
+
+    def _set_active_scroll_canvas(self, canvas: tk.Canvas) -> None:
+        self.active_scroll_canvas = canvas
+
+    def _clear_active_scroll_canvas(self, canvas: tk.Canvas) -> None:
+        if self.active_scroll_canvas is canvas:
+            self.active_scroll_canvas = None
+
+    def _on_global_mousewheel(self, event: tk.Event) -> str | None:
+        canvas = self.active_scroll_canvas
+        if canvas is None:
+            return None
+        try:
+            if getattr(event, "num", None) == 4:
+                units = -3
+            elif getattr(event, "num", None) == 5:
+                units = 3
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta == 0:
+                    return None
+                divisor = 1 if sys.platform == "darwin" else 120
+                units = -int(delta / divisor)
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+            canvas.yview_scroll(units, "units")
+            return "break"
+        except tk.TclError:
+            return None
 
     def _card(
         self,
@@ -2209,12 +2310,10 @@ class OperatorUi(ctk.CTk):
         self.autosave_ready = False
         try:
             values = self._profile_values(self.profile_name)
-            provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
-            if provider not in PROVIDERS:
-                provider = "jcode"
+            provider = preferred_available_provider(values.get("TELEGRAM_OPERATOR_PROVIDER", ""))
             run_mode = values.get("TELEGRAM_OPERATOR_RUN_MODE", "").strip()
-            if not run_mode:
-                run_mode = "cloud" if provider in CLOUD_HARNESSES else "local"
+            if not run_mode or (provider != "jcode" and run_mode == "local"):
+                run_mode = provider_run_mode(provider)
             model_provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip() or "lmstudio"
             safety_value = values.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip()
             legacy = values.get("TELEGRAM_OPERATOR_SAFE_MODE", DEFAULTS["TELEGRAM_OPERATOR_SAFE_MODE"])
@@ -2454,7 +2553,7 @@ class OperatorUi(ctk.CTk):
             urls.append(remote)
         urls.extend(local_speech_urls())
 
-        voices = []
+        voices = list(DEFAULT_KOKORO_VOICES)
         seen_urls = set()
         for url in urls:
             url = url.rstrip("/")
@@ -2471,7 +2570,7 @@ class OperatorUi(ctk.CTk):
                         for nested in value.values():
                             if isinstance(nested, list):
                                 voices.extend(str(item) for item in nested)
-                if voices:
+                if len(voices) > len(DEFAULT_KOKORO_VOICES):
                     break
             except (OSError, URLError, json.JSONDecodeError):
                 continue

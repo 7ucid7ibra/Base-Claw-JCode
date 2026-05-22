@@ -27,6 +27,36 @@ PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
 CUSTOM_VOICES_DIR = PROJECT_ROOT / "custom_voices"
 GERMAN_KOKORO_DIR = PROJECT_ROOT / "german_kokoro"
+DEFAULT_KOKORO_VOICES = [
+    "af_alloy",
+    "af_aoede",
+    "af_bella",
+    "af_heart",
+    "af_jessica",
+    "af_kore",
+    "af_nicole",
+    "af_nova",
+    "af_river",
+    "af_sarah",
+    "af_sky",
+    "am_adam",
+    "am_echo",
+    "am_eric",
+    "am_fenrir",
+    "am_liam",
+    "am_michael",
+    "am_onyx",
+    "am_puck",
+    "am_santa",
+    "bf_alice",
+    "bf_emma",
+    "bf_isabella",
+    "bf_lily",
+    "bm_daniel",
+    "bm_fable",
+    "bm_george",
+    "bm_lewis",
+]
 GERMAN_KOKORO_CODE_DIR = PROJECT_ROOT / "kokoro_german" / "kokoro"
 
 LANGUAGES: Dict[str, str] = {
@@ -339,7 +369,7 @@ def languages() -> Dict[str, str]:
 def voices() -> dict:
     return {
         "repo_id": REPO_ID,
-        "voices": discover_cached_voices(),
+        "voices": sorted({*DEFAULT_KOKORO_VOICES, *discover_cached_voices()}),
         "custom_voices": sorted(discover_custom_voice_paths().keys()),
         "german_voices": sorted(discover_german_voice_paths().keys()),
     }
