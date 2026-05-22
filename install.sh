@@ -138,6 +138,17 @@ python_bin() {
   done
 }
 
+install_supported_python() {
+  if [[ "$(uname -s)" != "Darwin" ]] || ! have brew; then
+    return 1
+  fi
+  if ask "Install Python 3.12 and Tkinter with Homebrew?" "y"; then
+    brew install python@3.12 python-tk@3.12
+    return 0
+  fi
+  return 1
+}
+
 ensure_node_tool() {
   local binary="$1"
   local package="$2"
@@ -261,8 +272,13 @@ setup_venv() {
   local requirements="$2"
   local py
   py="$(python_bin)"
+  if [[ -z "$py" ]] || ! python_version_ok "$py"; then
+    if install_supported_python; then
+      py="$(python_bin)"
+    fi
+  fi
   if [[ -z "$py" ]]; then
-    say "Python 3 was not found. Install Python 3.11+ first."
+    say "Python 3.11 or newer was not found. Install Python 3.11+ first, then rerun ./install.sh."
     exit 1
   fi
   if ! python_version_ok "$py"; then
