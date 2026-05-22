@@ -96,20 +96,46 @@ import tkinter
 PY
 }
 
+python_version_ok() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
+python_version_label() {
+  "$1" - <<'PY' 2>/dev/null || printf 'unknown'
+import sys
+print(".".join(map(str, sys.version_info[:3])))
+PY
+}
+
 python_bin() {
-  local fallback=""
   local name path
-  for name in python3.12 python3.11 python3; do
+  for name in python3.12 python3.11 python3.10 python3; do
     if have "$name"; then
       path="$(command -v "$name")"
-      [[ -z "$fallback" ]] && fallback="$path"
-      if python_has_tkinter "$path"; then
+      if python_version_ok "$path" && python_has_tkinter "$path"; then
         echo "$path"
         return
       fi
     fi
   done
-  echo "$fallback"
+  for name in python3.12 python3.11 python3.10 python3; do
+    if have "$name"; then
+      path="$(command -v "$name")"
+      if python_version_ok "$path"; then
+        echo "$path"
+        return
+      fi
+    fi
+  done
+  for name in python3.12 python3.11 python3.10 python3; do
+    if have "$name"; then
+      command -v "$name"
+      return
+    fi
+  done
 }
 
 ensure_node_tool() {
@@ -239,6 +265,11 @@ setup_venv() {
     say "Python 3 was not found. Install Python 3.11+ first."
     exit 1
   fi
+  if ! python_version_ok "$py"; then
+    say "Python 3.11 or newer is required, but $py is $(python_version_label "$py")."
+    say "Install Python 3.11+ first, then rerun ./install.sh."
+    exit 1
+  fi
   if [[ "$venv" == ".venv-telegram-agent" ]]; then
     ensure_tkinter "$py"
     py="$(python_bin)"
@@ -248,6 +279,10 @@ setup_venv() {
     fi
   fi
   if [[ ! -d "$venv" ]]; then
+    "$py" -m venv "$venv"
+  elif ! python_version_ok "$venv/bin/python"; then
+    say "Recreating $venv because it was made with Python $(python_version_label "$venv/bin/python")."
+    rm -rf "$venv"
     "$py" -m venv "$venv"
   fi
   if [[ "$venv" == ".venv-telegram-agent" ]] && ! python_has_tkinter "$venv/bin/python"; then
