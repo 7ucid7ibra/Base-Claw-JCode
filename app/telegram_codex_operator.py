@@ -70,9 +70,40 @@ STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
 VOICE_CAPTION_MAX_CHARS = 999
 PDF_EXTRACT_MAX_CHARS = 60000
+TEXT_DOCUMENT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 VIDEO_MIME_PREFIX = "video/"
+TEXT_DOCUMENT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".log",
+    ".xml",
+    ".html",
+    ".css",
+    ".js",
+    ".ts",
+    ".py",
+    ".sh",
+}
+TEXT_DOCUMENT_MIME_TYPES = {
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml",
+}
 DEFAULT_MANUAL_UPDATE_REF = "main"
 
 
@@ -131,6 +162,13 @@ def is_video_file(filename: str, mime_type: str) -> bool:
     if (mime_type or "").lower().startswith(VIDEO_MIME_PREFIX):
         return True
     return Path(filename or "").suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_text_document(filename: str, mime_type: str) -> bool:
+    lowered_mime = (mime_type or "").lower()
+    if lowered_mime.startswith("text/") or lowered_mime in TEXT_DOCUMENT_MIME_TYPES:
+        return True
+    return Path(filename or "").suffix.lower() in TEXT_DOCUMENT_EXTENSIONS
 
 
 def parse_bool(raw: str, default: bool) -> bool:
@@ -3722,6 +3760,18 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             text += "\n\n[PDF extraction truncated before sending to the agent.]"
         return text, truncated
 
+    def _read_text_document(self, text_path: Path, max_chars: int = TEXT_DOCUMENT_MAX_CHARS) -> tuple[str, bool]:
+        raw = text_path.read_bytes()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            text = raw.decode("utf-16", errors="replace")
+        else:
+            text = raw.decode("utf-8-sig", errors="replace")
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars]
+            text += "\n\n[Text document truncated before sending to the agent.]"
+        return text, truncated
+
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.document:
             return
@@ -3731,6 +3781,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         mime_type = document.mime_type or ""
         is_pdf = mime_type.lower() == "application/pdf" or filename.lower().endswith(".pdf")
         is_video_document = is_video_file(filename, mime_type)
+        is_text_file = is_text_document(filename, mime_type)
         document_metadata = {
             "document_file_id": document.file_id,
             "document_file_unique_id": document.file_unique_id,
@@ -3765,11 +3816,67 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 source="document",
             )
             return
+        if is_text_file and not is_pdf:
+            keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+            try:
+                upload_dir = self.config.workdir / "telegram_uploads" / "documents"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                saved_name = f"{update.message.message_id}_{safe_filename(filename)}"
+                text_path = upload_dir / saved_name
+                telegram_file = await context.bot.get_file(document.file_id)
+                await telegram_file.download_to_drive(custom_path=str(text_path))
+                text_content, truncated = await asyncio.to_thread(self._read_text_document, text_path)
+                document_metadata.update(
+                    {
+                        "saved_path": str(text_path),
+                        "extracted_chars": len(text_content),
+                        "truncated": truncated,
+                    }
+                )
+                self.message_store.append(
+                    direction="in",
+                    event_type="text_document_saved",
+                    chat_id=chat_id,
+                    telegram_message_id=update.message.message_id,
+                    telegram_user_id=update.effective_user.id if update.effective_user else None,
+                    telegram_username=update.effective_user.username if update.effective_user else None,
+                    telegram_full_name=update.effective_user.full_name if update.effective_user else None,
+                    message_type="text_document",
+                    text=update.message.caption,
+                    safe_mode=self.config.safe_mode,
+                    metadata=document_metadata,
+                )
+            except Exception as exc:
+                LOGGER.exception("Text document handling failed chat_id=%s", chat_id)
+                await self._stop_keepalive(keepalive)
+                await self._send_text_message(
+                    context,
+                    chat_id,
+                    f"Text file handling failed before it reached Codex: {exc}",
+                    event_type="text_document_failed",
+                )
+                return
+
+            body = "\n\n".join(
+                [
+                    update.message.caption or "Please read this text file and tell me what is inside.",
+                    "<internal_attachment_context>",
+                    "Text document received.",
+                    f"Filename: {filename}",
+                    f"Saved locally as: {text_path}",
+                    f"Extracted characters: {len(text_content)}",
+                    "</internal_attachment_context>",
+                    "Extracted text document content:",
+                    text_content,
+                ]
+            )
+            await self._process_user_message(update, context, body, keepalive=keepalive)
+            return
         if not is_pdf:
             await self._send_text_message(
                 context,
                 chat_id,
-                "I received a document, but it is not a PDF or video. For now I only handle PDF and video documents.",
+                "I received a document, but it is not a PDF, video, or supported text file.",
                 event_type="unsupported_document",
             )
             return
