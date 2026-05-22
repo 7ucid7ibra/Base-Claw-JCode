@@ -5,5 +5,4 @@ soundfile>=0.12.1
 requests>=2.32.0
 numpy>=1.26.0
 huggingface_hub>=0.24.0
-faster-whisper>=1.2.1
 python-multipart>=0.0.20

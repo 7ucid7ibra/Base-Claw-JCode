@@ -252,9 +252,18 @@ def synthesize_audio(request: SynthRequest) -> np.ndarray:
 def transcribe_audio(audio_path: Path, model_name: str) -> str:
     model_name = model_name.strip() or "small"
     worker = APP_DIR / "whisper_worker.py"
+    configured_whisper_python = os.environ.get("BASECLAW_WHISPER_PYTHON")
+    whisper_python = Path(configured_whisper_python).expanduser() if configured_whisper_python else None
+    if whisper_python is None:
+        if sys.platform.startswith("win"):
+            whisper_python = BASE_DIR / ".venv-whisper" / "Scripts" / "python.exe"
+        else:
+            whisper_python = BASE_DIR / ".venv-whisper" / "bin" / "python"
+    if not whisper_python.exists():
+        whisper_python = Path(sys.executable)
     timeout = int(os.environ.get("BASECLAW_WHISPER_TIMEOUT_SECONDS", "300"))
     process = subprocess.run(
-        [sys.executable, str(worker), "--model", model_name, str(audio_path)],
+        [str(whisper_python), str(worker), "--model", model_name, str(audio_path)],
         text=True,
         capture_output=True,
         timeout=timeout,

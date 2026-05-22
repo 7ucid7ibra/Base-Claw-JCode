@@ -740,8 +740,14 @@ def local_speech_python_path() -> Path:
     return BASE_DIR / ".venv-kokoro" / "bin" / "python"
 
 
+def local_whisper_python_path() -> Path:
+    if sys.platform.startswith("win"):
+        return BASE_DIR / ".venv-whisper" / "Scripts" / "python.exe"
+    return BASE_DIR / ".venv-whisper" / "bin" / "python"
+
+
 def local_speech_installed() -> bool:
-    return local_speech_python_path().exists()
+    return local_speech_python_path().exists() and local_whisper_python_path().exists()
 
 
 def local_speech_state() -> tuple[str, str]:
@@ -801,6 +807,14 @@ def install_local_speech_host() -> tuple[bool, str]:
         return False, "Could not create the local speech virtual environment."
     subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"], cwd=str(BASE_DIR), check=True, timeout=300)
     subprocess.run([str(python), "-m", "pip", "install", "-r", "requirements/kokoro.txt"], cwd=str(BASE_DIR), check=True, timeout=900)
+    whisper_venv = BASE_DIR / ".venv-whisper"
+    if not whisper_venv.exists():
+        subprocess.run([py, "-m", "venv", str(whisper_venv)], cwd=str(BASE_DIR), check=True, timeout=120)
+    whisper_python = local_whisper_python_path()
+    if not whisper_python.exists():
+        return False, "Could not create the local Whisper virtual environment."
+    subprocess.run([str(whisper_python), "-m", "pip", "install", "--upgrade", "pip", "wheel"], cwd=str(BASE_DIR), check=True, timeout=300)
+    subprocess.run([str(whisper_python), "-m", "pip", "install", "-r", "requirements/whisper.txt"], cwd=str(BASE_DIR), check=True, timeout=900)
     write_local_speech_installed_flag()
     return True, "Local speech support installed."
 

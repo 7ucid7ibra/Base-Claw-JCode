@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 VENV_DIR=".venv-kokoro"
 PYTHON="$VENV_DIR/bin/python"
+WHISPER_VENV_DIR=".venv-whisper"
+WHISPER_PYTHON="$WHISPER_VENV_DIR/bin/python"
 PID_FILE="kokoro_server.pid"
 LOG_FILE="kokoro_server.log"
 URL="${BASECLAW_SPEECH_URL:-http://127.0.0.1:8766}"
@@ -35,6 +37,11 @@ install_server() {
   fi
   "$PYTHON" -m pip install --upgrade pip wheel
   "$PYTHON" -m pip install -r requirements/kokoro.txt
+  if [[ ! -d "$WHISPER_VENV_DIR" ]]; then
+    "$py" -m venv "$WHISPER_VENV_DIR"
+  fi
+  "$WHISPER_PYTHON" -m pip install --upgrade pip wheel
+  "$WHISPER_PYTHON" -m pip install -r requirements/whisper.txt
   if [[ -f ".baseclaw-install.conf" ]] && grep -q '^BASECLAW_WITH_KOKORO=' ".baseclaw-install.conf"; then
     "$py" - <<'PY'
 from pathlib import Path
@@ -54,7 +61,7 @@ start_server() {
     say "Speech server is already running at $URL."
     return
   fi
-  if [[ ! -x "$PYTHON" ]]; then
+  if [[ ! -x "$PYTHON" || ! -x "$WHISPER_PYTHON" ]]; then
     say "Speech server is not installed. Run: scripts/speech_server.sh install"
     exit 1
   fi
@@ -100,7 +107,7 @@ case "${1:-status}" in
   status)
     if is_running; then
       say "running $URL"
-    elif [[ -x "$PYTHON" ]]; then
+    elif [[ -x "$PYTHON" && -x "$WHISPER_PYTHON" ]]; then
       say "stopped"
     else
       say "not installed"
