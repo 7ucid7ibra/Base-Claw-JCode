@@ -166,7 +166,12 @@ ensure_node_tool() {
     return
   fi
   if ask "Install $label globally with npm?" "y"; then
-    npm install -g "$package"
+    if npm install -g "$package"; then
+      say "$label installed."
+    else
+      say "$label install failed. This optional step is being skipped."
+      say "If npm reports EACCES, fix your npm global permissions or install $label manually, then rerun ./install.sh --setup."
+    fi
   else
     say "Skipped $label."
   fi
