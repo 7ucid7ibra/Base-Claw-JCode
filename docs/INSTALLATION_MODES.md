@@ -19,13 +19,13 @@ This installs:
 Start the speech host:
 
 ```powershell
-.\start-kokoro.ps1
+.\launchers\windows\start-kokoro.ps1
 ```
 
 Start the UI:
 
 ```powershell
-.\start-ui.ps1
+.\launchers\windows\start-ui.ps1
 ```
 
 ## Speech Host
@@ -34,7 +34,7 @@ Use this on a stronger machine that will serve Kokoro TTS, Whisper transcription
 
 ```powershell
 .\install.ps1 -Mode host
-.\start-kokoro.ps1
+.\launchers\windows\start-kokoro.ps1
 ```
 
 The host needs:
@@ -63,7 +63,7 @@ This installs only the client dependencies. It does not install Kokoro or faster
 Then open:
 
 ```powershell
-.\start-ui.ps1
+.\launchers\windows\start-ui.ps1
 ```
 
 Set `Host IP / name` to the host machine and keep `STT/TTS port` at `8766`, for example:

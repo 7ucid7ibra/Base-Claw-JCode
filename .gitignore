@@ -37,6 +37,17 @@ build/
 .DS_Store
 .cache/
 
+# Optional local TTS assets. Keep only the small README placeholders in git.
+voice_assets/custom/*
+!voice_assets/custom/README.md
+voice_assets/german/*
+!voice_assets/german/README.md
+!voice_assets/german/voices/
+voice_assets/german/voices/*
+!voice_assets/german/voices/README.md
+voice_assets/german_package/*
+!voice_assets/german_package/README.md
+
 # Local-only assets and experiments
 external/
 smoke/

@@ -1,11 +1,11 @@
-# German Kokoro Code
+# German Kokoro Package
 
 This folder is for the optional local German Kokoro-compatible Python package.
 
 Expected layout:
 
 ```text
-kokoro_german/
+voice_assets/german_package/
   kokoro/
     __init__.py
     ...

@@ -281,14 +281,14 @@ if ($installClient) {
 Write-Step "Next steps"
 if ($installClient) {
     Write-Host "1. Edit .env.telegram-operator or use the UI to set TELEGRAM_BOT_TOKEN and TELEGRAM_ALLOWED_CHAT_IDS."
-    Write-Host "2. Start the UI later with: .\start-ui.ps1"
+    Write-Host "2. Start the UI later with: .\launchers\windows\start-ui.ps1"
     Write-Host "3. Optional provider installs: -InstallJCode, -InstallCodex, -InstallClaude, -InstallGemini, or -InstallProviderTools."
 }
 if ($installHost) {
-    Write-Host "Speech host can be started with: .\start-kokoro.ps1"
+    Write-Host "Speech host can be started with: .\launchers\windows\start-kokoro.ps1"
 }
 
 if ($installClient -and -not $NoLaunch) {
     Write-Step "Starting UI"
-    & ".\start-ui.ps1"
+    & ".\launchers\windows\start-ui.ps1"
 }

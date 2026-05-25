@@ -34,7 +34,7 @@ Use a fresh repository or clean export containing:
 - setup and start scripts
 - docs
 - `agent_workspace/AGENT_HOME.md`
-- placeholder READMEs under `custom_voices/`, `german_kokoro/`, and `kokoro_german/`
+- placeholder READMEs under `voice_assets/`
 - `.env.telegram-operator.example`
 
 Do not include:

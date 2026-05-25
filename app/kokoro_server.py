@@ -25,8 +25,9 @@ SAMPLE_RATE = 24000
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
-CUSTOM_VOICES_DIR = PROJECT_ROOT / "custom_voices"
-GERMAN_KOKORO_DIR = PROJECT_ROOT / "german_kokoro"
+VOICE_ASSETS_DIR = PROJECT_ROOT / "voice_assets"
+CUSTOM_VOICES_DIR = VOICE_ASSETS_DIR / "custom"
+GERMAN_KOKORO_DIR = VOICE_ASSETS_DIR / "german"
 DEFAULT_KOKORO_VOICES = [
     "af_alloy",
     "af_aoede",
@@ -57,7 +58,7 @@ DEFAULT_KOKORO_VOICES = [
     "bm_george",
     "bm_lewis",
 ]
-GERMAN_KOKORO_CODE_DIR = PROJECT_ROOT / "kokoro_german" / "kokoro"
+GERMAN_KOKORO_CODE_DIR = VOICE_ASSETS_DIR / "german_package" / "kokoro"
 
 LANGUAGES: Dict[str, str] = {
     "a": "American English",

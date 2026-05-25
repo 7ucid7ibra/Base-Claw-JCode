@@ -14,6 +14,11 @@ scripts/
   start_kokoro_server.ps1
   start_telegram_operator_ui.ps1
   run_telegram_codex_operator.ps1
+launchers/
+  macos/
+  windows/
+packaging/
+  windows/
 requirements/
   client.txt
   kokoro.txt
@@ -25,16 +30,16 @@ docs/
   TROUBLESHOOTING.md
   PUBLISHING.md
 agent_workspace/
-custom_voices/
-german_kokoro/
-kokoro_german/
+voice_assets/
+  custom/
+  german/
+  german_package/
 ```
 
 Root convenience scripts:
 
 - `install.ps1`
-- `start-kokoro.ps1`
-- `start-ui.ps1`
-- `run-operator.ps1`
+- `install.sh`
+- `start.sh`
 
 Runtime files such as `.env.telegram-operator`, `profiles/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.

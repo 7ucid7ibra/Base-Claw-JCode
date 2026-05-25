@@ -13,7 +13,7 @@ It also contains a local Kokoro-82M HTTP TTS server for fast preset-voice speech
 
 Kokoro is intentionally isolated in its own Python 3.11 environment at `.venv-kokoro`; do not mix this setup into a Tortoise environment.
 
-German Kokoro support is available as an optional local add-on when compatible code and model assets are placed under `kokoro_german/` and `german_kokoro/`. The fresh checkout includes placeholder folders, not the large model files.
+German Kokoro support is available as an optional local add-on when compatible code and model assets are placed under `voice_assets/`. The fresh checkout includes placeholder READMEs, not the large model files.
 
 ## Project Status
 
@@ -28,11 +28,13 @@ BaseClaw is licensed under the Apache License 2.0. The project is intended to st
 ## Project Layout
 
 - `app/`: Python entry points for Kokoro, Telegram, and the UI.
-- `scripts/`: Windows installer and service-start helper scripts.
+- `scripts/`: installer, build, and service helper scripts.
+- `launchers/`: double-click and platform-specific launcher wrappers.
+- `packaging/`: installer packaging definitions.
 - `requirements/`: split Python dependency files for Kokoro and the Telegram operator.
 - `docs/`: usage, operator, troubleshooting, publishing, and layout notes.
 - `agent_workspace/`: the default assistant home.
-- `custom_voices/`, `german_kokoro/`, `kokoro_german/`: optional local voice/model asset folders.
+- `voice_assets/`: optional local Kokoro voice/model asset folders.
 
 ## What You Need
 
@@ -65,7 +67,7 @@ The script is safe to rerun. First setup asks about optional components such as 
 
 On macOS, `install.sh` also creates a user-level launcher at `~/Applications/BaseClaw.app`. After the first setup, you can start BaseClaw by double-clicking that app instead of opening Terminal in the project folder.
 
-On macOS you can also double-click `install-macos.command` for first setup or `start-macos.command` for daily startup. To generate a simple local `BaseClaw.app` wrapper, run:
+On macOS you can also double-click `launchers/macos/install-macos.command` for first setup or `launchers/macos/start-macos.command` for daily startup. To generate a simple local `BaseClaw.app` wrapper, run:
 
 ```bash
 ./scripts/build_macos_app.sh
@@ -117,7 +119,7 @@ For a guided first setup with questions about Kokoro/Whisper speech and optional
 For a double-click Windows installer window, open:
 
 ```text
-install-wizard.cmd
+launchers\windows\install-wizard.cmd
 ```
 
 The wizard lets you choose client/full/speech-host mode, JCode, Codex, Claude, Gemini, and whether to launch the UI after installation.
@@ -183,7 +185,7 @@ The server binds to `0.0.0.0:8766`.
 On Windows you can also run:
 
 ```powershell
-.\start-kokoro.ps1
+.\launchers\windows\start-kokoro.ps1
 ```
 
 ## Endpoints
@@ -191,7 +193,7 @@ On Windows you can also run:
 - `GET /health` returns service status, repo ID, and loaded language pipelines.
 - `GET /languages` returns supported Kokoro language codes.
 - `GET /voices` scans the local Hugging Face cache and returns cached voice files for `hexgrad/Kokoro-82M`.
-- `GET /voices` also reports any local `.pt` files in `custom_voices/` as `custom_voices`.
+- `GET /voices` also reports any local `.pt` files in `voice_assets/custom/` as `custom_voices`.
 - `GET /voices` reports German Kokoro voices under `german_voices`.
 - `POST /synthesize` accepts `text`, `voice`, `lang_code`, and `speed`, then returns raw WAV bytes.
 - `POST /synthesize_voice_note` accepts the same body and returns OGG/Opus bytes for Telegram voice notes.
@@ -201,7 +203,7 @@ On Windows you can also run:
 Local community voice packs can be placed in:
 
 ```text
-custom_voices
+voice_assets/custom
 ```
 
 If a file is named `am_dylan.pt`, you can call `/synthesize` with `"voice": "am_dylan"`.
@@ -211,16 +213,16 @@ If a file is named `am_dylan.pt`, you can call `/synthesize` with `"voice": "am_
 The server can also support:
 
 - `lang_code: "d"` for German
-- `voice: "dm_martin"` when `german_kokoro/voices/martin.pt` is installed
-- `voice: "dm_victoria"` when `german_kokoro/voices/victoria.pt` is installed
+- `voice: "dm_martin"` when `voice_assets/german/voices/martin.pt` is installed
+- `voice: "dm_victoria"` when `voice_assets/german/voices/victoria.pt` is installed
 
 The optional German setup expects:
 
 ```text
-kokoro_german/kokoro/
-german_kokoro/config.json
-german_kokoro/kikiri_german_martin_ep10.pth
-german_kokoro/voices/*.pt
+voice_assets/german_package/kokoro/
+voice_assets/german/config.json
+voice_assets/german/kikiri_german_martin_ep10.pth
+voice_assets/german/voices/*.pt
 ```
 
 Example:
@@ -292,7 +294,7 @@ python -m pip install -r requirements\telegram-operator.txt
 Open the settings window:
 
 ```powershell
-.\start-ui.ps1
+.\launchers\windows\start-ui.ps1
 ```
 
 Run it:
@@ -302,7 +304,7 @@ Run it:
 python app\telegram_codex_operator.py
 ```
 
-You can also run `.\run-operator.ps1` to keep the operator restarting after crashes.
+You can also run `.\launchers\windows\run-operator.ps1` to keep the operator restarting after crashes.
 
 The operator reads its own dedicated config from `.env.telegram-operator`, so it can stay pinned to a specific bot, chat allowlist, workspace home, selected harness, model provider, and Kokoro voice. The UI can also create named agent profiles. Each profile gets its own env file, workspace, SQLite history, session state, and logs under `profiles/<name>/`, so multiple Telegram bots can run at the same time from one BaseClaw install.
 

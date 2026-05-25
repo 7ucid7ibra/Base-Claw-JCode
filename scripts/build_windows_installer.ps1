@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $stageDir = Join-Path $projectRoot "dist\windows-installer-stage"
-$issPath = Join-Path $projectRoot "installer\baseclaw.iss"
+$issPath = Join-Path $projectRoot "packaging\windows\baseclaw.iss"
 
 function Resolve-InnoCompiler {
     $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue

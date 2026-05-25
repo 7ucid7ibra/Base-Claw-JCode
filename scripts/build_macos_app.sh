@@ -57,7 +57,7 @@ for candidate in "$APP_EXEC/../../.." "$APP_EXEC/../../../.."; do
 done
 
 echo "BaseClaw.app could not find start.sh next to the application bundle."
-echo "Use install-macos.command for first setup, then start-macos.command for daily startup."
+echo "Use launchers/macos/install-macos.command for first setup, then launchers/macos/start-macos.command for daily startup."
 read -r -p "Press Return to close. " _
 exit 1
 SH
