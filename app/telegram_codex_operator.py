@@ -857,6 +857,89 @@ class SQLiteMessageStore:
             return ""
 
     @staticmethod
+    def _recall_terms(text: str, *, limit: int = 8) -> list[str]:
+        stop_words = {
+            "about",
+            "after",
+            "again",
+            "because",
+            "before",
+            "could",
+            "from",
+            "have",
+            "here",
+            "latest",
+            "like",
+            "more",
+            "should",
+            "that",
+            "their",
+            "there",
+            "this",
+            "through",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+            "would",
+            "your",
+        }
+        terms: list[str] = []
+        for term in re.findall(r"[A-Za-z0-9_@.-]{4,}", text.lower()):
+            normalized = term.strip("._-")
+            if not normalized or normalized in stop_words:
+                continue
+            if normalized not in terms:
+                terms.append(normalized)
+            if len(terms) >= limit:
+                break
+        return terms
+
+    def recalled_context_rows(self, *, chat_id: int, current_text: str, limit: int = 6) -> list[dict[str, str]]:
+        terms = self._recall_terms(current_text)
+        if not terms:
+            return []
+        limit = max(1, min(12, limit))
+        where_clauses = []
+        params: list[Any] = [chat_id]
+        for term in terms:
+            where_clauses.append("LOWER(COALESCE(text, '') || ' ' || COALESCE(transcript, '')) LIKE ?")
+            params.append(f"%{term}%")
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    f"""
+                    SELECT id, direction, event_type, text, transcript, recorded_at
+                    FROM telegram_messages
+                    WHERE
+                        direction IN ('in', 'out')
+                        AND (chat_id = ? OR chat_id IS NULL)
+                        AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                        AND ({" OR ".join(where_clauses)})
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to recall context rows chat_id=%s", chat_id)
+            return []
+
+        payload = []
+        current_norm = " ".join(current_text.strip().split())
+        for row in reversed(rows):
+            event_type = row["event_type"] or ""
+            role = "user" if row["direction"] == "in" or event_type.startswith("desktop_user") else "assistant"
+            text = (row["transcript"] or row["text"] or "").strip()
+            if not text or " ".join(text.split()) == current_norm:
+                continue
+            payload.append({"role": role, "text": text, "recorded_at": str(row["recorded_at"] or "")})
+        return payload
+
+    @staticmethod
     def _compact_memory_line(text: str, limit: int = 220) -> str:
         text = " ".join(text.strip().split())
         if len(text) <= limit:
@@ -3054,7 +3137,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return ""
         rows = self.message_store.recent_context_rows(chat_id=chat_id, limit=self.config.shared_context_limit)
         summary = self.message_store.continuity_summary(chat_id=chat_id, recent_limit=self.config.shared_context_limit)
-        if not rows and not summary:
+        recalled_rows = self.message_store.recalled_context_rows(
+            chat_id=chat_id,
+            current_text=current_text,
+            limit=6,
+        )
+        if not rows and not summary and not recalled_rows:
             return ""
         skip_index = -1
         current_text = current_text.strip()
@@ -3072,7 +3160,21 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 continue
             if text:
                 lines.append(f"{role}: {text[:900]}")
-        if not lines and not summary:
+        recalled_lines = []
+        seen_recalled: set[str] = set()
+        for row in recalled_rows:
+            role = "User" if row["role"] == "user" else "Assistant"
+            text = row["text"].strip()
+            if not text:
+                continue
+            compact = " ".join(text.split())
+            if compact in seen_recalled:
+                continue
+            seen_recalled.add(compact)
+            recorded_at = row.get("recorded_at") or ""
+            prefix = f"{recorded_at} " if recorded_at else ""
+            recalled_lines.append(f"{prefix}{role}: {text[:900]}")
+        if not lines and not summary and not recalled_lines:
             return ""
         parts = [
             "Shared BaseClaw continuity context:",
@@ -3080,6 +3182,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         ]
         if summary:
             parts.extend(["Rolling conversation summary:", summary])
+        if recalled_lines:
+            parts.extend(["Relevant recalled history from SQLite:", *recalled_lines])
         if lines:
             parts.extend(["Recent messages:", *lines])
         return "\n".join(parts)
@@ -4698,7 +4802,7 @@ def load_config() -> OperatorConfig:
         jcode_api_key=os.environ.get("TELEGRAM_OPERATOR_JCODE_API_KEY", ""),
         jcode_provider_profile=os.environ.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", ""),
         jcode_base_url=jcode_base_url,
-        shared_context_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", ""), False),
+        shared_context_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", ""), True),
         shared_context_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_LIMIT", ""), 12),
         safety_mode=safety_mode,
         safe_mode=action_mode != "full" or access_scope != "full",

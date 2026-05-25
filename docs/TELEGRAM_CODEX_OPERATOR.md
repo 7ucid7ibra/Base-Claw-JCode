@@ -77,11 +77,11 @@ Key settings:
 - `TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE`: optional advanced JCode profile. Leave it empty for the normal UI flow.
 - `TELEGRAM_OPERATOR_JCODE_API_KEY`: optional key for hosted JCode providers.
 - `TELEGRAM_OPERATOR_CODEX_MODEL`: model name passed to the selected harness when supported.
-- `TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED`: optional rolling continuity summary and recent chat context injection across Telegram, desktop, and harness switches.
+- `TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED`: rolling continuity summary, recent chat context injection, and keyword recall from older SQLite history across Telegram, desktop, and harness switches.
 
 The desktop UI supports named agent profiles. The `main` profile uses the root `.env.telegram-operator` and root runtime files for backward compatibility. Additional profiles live under `profiles/<name>/` and have their own env file, workspace, SQLite message history, session state, memory log, and operator log. Starting a profile launches a separate operator process, so different Telegram bot tokens can run simultaneously from the same install. Deleting a non-main profile stops that profile and removes its local profile folder.
 
-For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse incompatible session ids. If shared context injection is enabled, BaseClaw also adds a rolling continuity summary plus a compact recent chat-history block to each prompt; old messages are explicitly marked as context, not new instructions.
+For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse incompatible session ids. If shared context injection is enabled, BaseClaw also adds a rolling continuity summary, a compact recent chat-history block, and a few keyword-matched older SQLite history entries to each prompt; old messages are explicitly marked as context, not new instructions.
 
 ## Safety And Access
 
