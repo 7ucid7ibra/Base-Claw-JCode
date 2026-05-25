@@ -325,6 +325,8 @@ Requests run through the selected harness. The Telegram typing or recording indi
 
 Voice selection uses Kokoro language codes: `a` is American English, `b` is British English, and `d` is the optional local German Kokoro pipeline. The UI auto-updates the code for common voice prefixes like `af_`, `am_`, `bf_`, `bm_`, and `dm_`.
 
+Written Telegram replies and spoken Kokoro replies are separated. Links, file paths, and code blocks stay visible in the text message, but the spoken voice note uses a cleaned version so it says short labels like `plane.so` instead of reading full URLs, slashes, or long local paths aloud.
+
 For speech hosting, set `Host IP / name` and `STT/TTS port` in the UI. Use `127.0.0.1` for local speech, or another reachable IP/hostname for a separate speech host. The STT/TTS port is used for both Whisper transcription and Kokoro voice output. BaseClaw also tries local speech candidates automatically, so a stale remote host does not prevent a working local Kokoro server from being used. If no speech host is reachable, BaseClaw can still start text-only and voice features stay unavailable until speech is configured. The operator can also send a short startup notice to the allowed chat ids so pressing Start has visible feedback.
 
 When JCode is used with LM Studio or Ollama, BaseClaw creates or updates a JCode provider profile from the selected Host IP/name, the automatically selected local model port, and model before running the agent. LM Studio uses port `1234` and Ollama uses port `11434` by default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse stale session ids.

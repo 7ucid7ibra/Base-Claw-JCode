@@ -69,6 +69,7 @@ STATUS_UPDATE_INITIAL_DELAY_SECONDS = 120
 STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
 VOICE_CAPTION_MAX_CHARS = 999
+SPOKEN_TEXT_MAX_CHARS = 2400
 PDF_EXTRACT_MAX_CHARS = 60000
 TEXT_DOCUMENT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
@@ -105,6 +106,58 @@ TEXT_DOCUMENT_MIME_TYPES = {
     "text/xml",
 }
 DEFAULT_MANUAL_UPDATE_REF = "main"
+
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]{1,120})\]\((https?://[^)\s]+)\)")
+URL_RE = re.compile(r"https?://[^\s<>)\]]+")
+WINDOWS_PATH_RE = re.compile(r"(?<!\w)[A-Za-z]:\\[^\s<>\"]+")
+UNIX_PATH_RE = re.compile(
+    r"(?<!\w)(?:~|/(?:Users|home|var|tmp|mnt|media|opt|usr|etc|Applications))"
+    r"(?:/[^\s<>\":;,|]+)+"
+)
+FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _spoken_url_label(url: str) -> str:
+    try:
+        host = urlsplit(url).netloc.lower()
+    except Exception:
+        return "the link"
+    if host.startswith("www."):
+        host = host[4:]
+    return host or "the link"
+
+
+def _spoken_path_label(path_text: str) -> str:
+    cleaned = path_text.rstrip(".,;:)")
+    normalized = cleaned.replace("\\", "/").rstrip("/")
+    name = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
+    if not name or name in {"~", "."}:
+        return "a local path"
+    if "." in name and len(name) <= 48:
+        return f"the {name} file"
+    if len(name) <= 36:
+        return f"the {name} path"
+    return "a local path"
+
+
+def spoken_reply_text(text: str) -> str:
+    """Return a Kokoro-friendly copy while leaving the written reply unchanged."""
+    spoken = FENCED_CODE_RE.sub(" Code block omitted. ", text)
+    spoken = MARKDOWN_LINK_RE.sub(lambda match: f"{match.group(1)} at {_spoken_url_label(match.group(2))}", spoken)
+    spoken = URL_RE.sub(lambda match: _spoken_url_label(match.group(0)), spoken)
+    spoken = WINDOWS_PATH_RE.sub(lambda match: _spoken_path_label(match.group(0)), spoken)
+    spoken = UNIX_PATH_RE.sub(lambda match: _spoken_path_label(match.group(0)), spoken)
+    spoken = re.sub(
+        r"`([^`]{1,160})`",
+        lambda match: _spoken_path_label(match.group(1))
+        if "/" in match.group(1) or "\\" in match.group(1)
+        else match.group(1),
+        spoken,
+    )
+    spoken = re.sub(r"\s+", " ", spoken).strip()
+    if len(spoken) > SPOKEN_TEXT_MAX_CHARS:
+        spoken = spoken[:SPOKEN_TEXT_MAX_CHARS].rsplit(" ", 1)[0].rstrip() + "."
+    return spoken
 
 
 def utc_now() -> str:
@@ -2984,15 +3037,19 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if not self.config.voice_replies_enabled:
             await self._send_text_chunks(context, chat_id, text)
             return
+        spoken_text = spoken_reply_text(text)
+        if not spoken_text:
+            await self._send_text_chunks(context, chat_id, text)
+            return
         if len(text) > VOICE_CAPTION_MAX_CHARS:
             await self._send_text_chunks(context, chat_id, text)
             try:
-                await self._send_voice_reply(context, chat_id, text, caption=None)
+                await self._send_voice_reply(context, chat_id, spoken_text, caption=None)
             except Exception:
                 LOGGER.exception("Voice reply failed after text delivery chat_id=%s", chat_id)
             return
         try:
-            await self._send_voice_reply(context, chat_id, text, caption=text)
+            await self._send_voice_reply(context, chat_id, spoken_text, caption=text)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
             voice_error = friendly_voice_error(exc)

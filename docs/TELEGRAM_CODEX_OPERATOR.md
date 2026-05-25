@@ -168,6 +168,8 @@ python app/telegram_codex_operator.py
 
 Text and voice requests are routed to the selected harness. The bridge keeps Telegram typing or recording indicators active until the final reply is delivered, and sends compact progress updates during longer runs.
 
+Written replies and spoken replies are separated before TTS. The Telegram text can include full links, file paths, and code, while the Kokoro voice note receives a spoken-friendly version that shortens URLs to domains, abbreviates file paths to names, and skips fenced code blocks.
+
 ## Persistence
 
 Local runtime state is intentionally ignored by git:
