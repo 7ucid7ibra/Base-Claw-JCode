@@ -1185,7 +1185,8 @@ class OperatorUi(ctk.CTk):
         self.update_available = False
         self.update_detail = ""
         self.start_button: ctk.CTkButton | None = None
-        self.stop_button: ctk.CTkButton | None = None
+        self.bridge_running: bool | None = None
+        self.bridge_button_hovered = False
         self.restart_button: ctk.CTkButton | None = None
         self.send_button: ctk.CTkButton | None = None
         self.thinking_label: ctk.CTkLabel | None = None
@@ -1660,7 +1661,7 @@ class OperatorUi(ctk.CTk):
         runtime = self._card(settings_body, "Runtime", "Start, stop, update, and monitor the bridge.", 0, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        buttons.grid_columnconfigure((0, 1, 2), weight=1)
         self.start_button = ctk.CTkButton(
             buttons,
             text="Start bridge",
@@ -1669,21 +1670,11 @@ class OperatorUi(ctk.CTk):
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["accent_text"],
-            command=self.start_operator,
+            command=self.toggle_operator,
         )
-        self.start_button.grid(
-            row=0, column=0, sticky="ew", padx=(0, 6)
-        )
-        self.stop_button = ctk.CTkButton(
-            buttons,
-            text="Stop bridge",
-            height=40,
-            corner_radius=12,
-            fg_color=COLORS["danger"],
-            hover_color=COLORS["danger_hover"],
-            command=self.stop_operator,
-        )
-        self.stop_button.grid(row=0, column=1, sticky="ew", padx=6)
+        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.start_button.bind("<Enter>", self._bridge_button_enter, add="+")
+        self.start_button.bind("<Leave>", self._bridge_button_leave, add="+")
         self.restart_button = ctk.CTkButton(
             buttons,
             text="Restart",
@@ -1694,7 +1685,7 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
             command=self.restart_operator,
         )
-        self.restart_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        self.restart_button.grid(row=0, column=1, sticky="ew", padx=6)
         self.update_button = ctk.CTkButton(
             buttons,
             text="Update",
@@ -1705,7 +1696,7 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
             command=self.update_from_source,
         )
-        self.update_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        self.update_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
         self.status_detail = ctk.CTkLabel(runtime, text="Status: checking...", text_color=COLORS["muted"], anchor="w")
         self.status_detail.grid(row=1, column=0, sticky="ew")
 
@@ -2459,6 +2450,43 @@ class OperatorUi(ctk.CTk):
             self.status_pill.configure(text=label, fg_color=color)
         if self.status_detail:
             self.status_detail.configure(text=detail)
+        if running is not None:
+            self.bridge_running = running
+            self._update_bridge_button()
+
+    def _bridge_button_enter(self, _event: tk.Event | None = None) -> None:
+        self.bridge_button_hovered = True
+        self._update_bridge_button()
+
+    def _bridge_button_leave(self, _event: tk.Event | None = None) -> None:
+        self.bridge_button_hovered = False
+        self._update_bridge_button()
+
+    def _update_bridge_button(self) -> None:
+        if not self.start_button:
+            return
+        if self.bridge_running:
+            if self.bridge_button_hovered:
+                self.start_button.configure(
+                    text="Stop bridge",
+                    fg_color=COLORS["danger"],
+                    hover_color=COLORS["danger_hover"],
+                    text_color="#FFFFFF",
+                )
+            else:
+                self.start_button.configure(
+                    text="Running",
+                    fg_color="#2F6B4E",
+                    hover_color=COLORS["danger_hover"],
+                    text_color="#FFFFFF",
+                )
+            return
+        self.start_button.configure(
+            text="Start bridge",
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["accent_text"],
+        )
 
     def _wire_autosave(self) -> None:
         for var in self.vars.values():
@@ -3315,6 +3343,12 @@ class OperatorUi(ctk.CTk):
             f"Access policy: scope `{scope}`, action mode `{action}`, additional allowed paths `{allowed}`. "
             "Respect this policy even when the provider CLI cannot enforce it directly."
         )
+
+    def toggle_operator(self) -> None:
+        if root_operator_processes(self.env_path):
+            self.stop_operator()
+        else:
+            self.start_operator()
 
     def start_operator(self) -> None:
         self.save(show_message=False)
