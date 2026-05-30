@@ -143,8 +143,11 @@ python app/telegram_codex_operator.py
 - `/voice_status`
 - `/voice_on`
 - `/voice_off`
+- `/read`
 - `/update`
 - `/restart`
+
+`/read` creates a one-off voice note without permanently enabling voice replies. Send `/read` to read the latest assistant reply, reply to any stored Telegram message with `/read` to read that message, or send `/read next` to read only the next assistant response.
 
 Unknown slash commands are checked against local files in the current workspace's `slash_commands/` folder. For example, `/summarize notes.md` can load `agent_workspace/slash_commands/summarize.md` and send its instructions plus the user arguments to the selected agent. These local command files are ignored by git and are not part of BaseClaw source.
 

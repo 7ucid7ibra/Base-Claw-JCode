@@ -309,7 +309,7 @@ You can also run `.\launchers\windows\run-operator.ps1` to keep the operator res
 
 The operator reads its own dedicated config from `.env.telegram-operator`, so it can stay pinned to a specific bot, chat allowlist, workspace home, selected harness, model provider, and Kokoro voice. The UI can also create named agent profiles. Each profile gets its own env file, workspace, SQLite history, session state, and logs under `profiles/<name>/`, so multiple Telegram bots can run at the same time from one BaseClaw install.
 
-Telegram has a small built-in command set for status, help, reset, voice, update, and restart. User-defined slash commands live outside source code in the selected workspace's `slash_commands/` folder. Add a file such as `summarize.md`, then call `/summarize ...` in Telegram to run those local instructions through the selected agent.
+Telegram has a small built-in command set for status, help, reset, voice, read, update, and restart. `/read` creates one-off voice notes: read the latest assistant reply, reply to an older message with `/read`, or use `/read next` to read only the next assistant response. User-defined slash commands live outside source code in the selected workspace's `slash_commands/` folder. Add a file such as `summarize.md`, then call `/summarize ...` in Telegram to run those local instructions through the selected agent.
 
 `.env.telegram-operator` is local-only and ignored by git. Start from `.env.telegram-operator.example`, then fill in your own bot token and allowed chat id. If a real bot token was ever committed or shared, rotate it before publishing the project.
 

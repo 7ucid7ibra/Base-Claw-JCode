@@ -158,6 +158,22 @@ def spoken_reply_text(text: str) -> str:
     return spoken
 
 
+def readable_message_text(text: Optional[str], transcript: Optional[str], metadata_json: Optional[str] = None) -> str:
+    if metadata_json:
+        try:
+            metadata = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            metadata = {}
+        for key in ("source_text", "caption", "text"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for value in (text, transcript):
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -573,9 +589,11 @@ class StateStore:
             self._data = {
                 "sessions": loaded.get("sessions", {}),
                 "provider_sessions": loaded.get("provider_sessions", {}),
+                "read_next_chats": loaded.get("read_next_chats", {}),
             }
         self._data.setdefault("sessions", {})
         self._data.setdefault("provider_sessions", {})
+        self._data.setdefault("read_next_chats", {})
 
     def save(self) -> None:
         self.path.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
@@ -604,6 +622,17 @@ class StateStore:
         self._data.setdefault("sessions", {}).pop(str(chat_id), None)
         self._data.setdefault("provider_sessions", {}).pop(str(chat_id), None)
         self.save()
+
+    def arm_read_next(self, chat_id: int) -> None:
+        self._data.setdefault("read_next_chats", {})[str(chat_id)] = utc_now()
+        self.save()
+
+    def consume_read_next(self, chat_id: int) -> bool:
+        armed = str(chat_id) in self._data.setdefault("read_next_chats", {})
+        if armed:
+            self._data["read_next_chats"].pop(str(chat_id), None)
+            self.save()
+        return armed
 
 
 class MemoryLog:
@@ -775,6 +804,49 @@ class SQLiteMessageStore:
             "recorded_at": row["recorded_at"],
             "metadata": metadata,
         }
+
+    def latest_assistant_reply_text(self, *, chat_id: int) -> str:
+        for query, params in (
+            (
+                """
+                SELECT text, transcript, metadata_json
+                FROM telegram_messages
+                WHERE chat_id = ?
+                    AND direction = 'internal'
+                    AND event_type = 'agent_turn_completed'
+                    AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            ),
+            (
+                """
+                SELECT text, transcript, metadata_json
+                FROM telegram_messages
+                WHERE chat_id = ?
+                    AND direction = 'out'
+                    AND message_type IN ('text', 'voice')
+                    AND COALESCE(NULLIF(text, ''), NULLIF(transcript, ''), NULLIF(metadata_json, '')) IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            ),
+        ):
+            try:
+                with self._connect() as connection:
+                    connection.row_factory = sqlite3.Row
+                    row = connection.execute(query, params).fetchone()
+            except (OSError, sqlite3.Error):
+                LOGGER.exception("Failed to load latest assistant reply chat_id=%s", chat_id)
+                return ""
+            if row is None:
+                continue
+            text = readable_message_text(row["text"], row["transcript"], row["metadata_json"])
+            if text:
+                return text
+        return ""
 
     def recent_context_rows(self, *, chat_id: int, limit: int) -> list[dict[str, str]]:
         limit = max(1, min(30, limit))
@@ -2401,8 +2473,9 @@ class TelegramCodexOperator:
         text: str,
         *,
         caption: Optional[str] = None,
+        force: bool = False,
     ) -> None:
-        if not self.config.voice_replies_enabled:
+        if not self.config.voice_replies_enabled and not force:
             return
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
             tmp_path = Path(tmp)
@@ -2448,6 +2521,7 @@ class TelegramCodexOperator:
         text: str,
         *,
         always_send_text: bool = False,
+        force_voice_once: bool = False,
     ) -> None:
         text, file_paths = self._extract_file_send_directives(text)
         if file_paths:
@@ -2457,7 +2531,7 @@ class TelegramCodexOperator:
                 await self._send_output_document(context, chat_id, file_path)
             return
 
-        if not self.config.voice_replies_enabled:
+        if not self.config.voice_replies_enabled and not force_voice_once:
             await self._send_text_chunks(context, chat_id, text)
             return
         spoken_text = spoken_reply_text(text)
@@ -2467,12 +2541,12 @@ class TelegramCodexOperator:
         if len(text) > VOICE_CAPTION_MAX_CHARS:
             await self._send_text_chunks(context, chat_id, text)
             try:
-                await self._send_voice_reply(context, chat_id, spoken_text, caption=None)
+                await self._send_voice_reply(context, chat_id, spoken_text, caption=None, force=force_voice_once)
             except Exception:
                 LOGGER.exception("Voice reply failed after text delivery chat_id=%s", chat_id)
             return
         try:
-            await self._send_voice_reply(context, chat_id, spoken_text, caption=text)
+            await self._send_voice_reply(context, chat_id, spoken_text, caption=text, force=force_voice_once)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
             voice_error = friendly_voice_error(exc)
@@ -2839,8 +2913,9 @@ class TelegramCodexOperator:
                 },
             )
 
+            force_voice_once = self.state.consume_read_next(chat_id)
             try:
-                await self._send_assistant_reply(context, chat_id, reply_text)
+                await self._send_assistant_reply(context, chat_id, reply_text, force_voice_once=force_voice_once)
             finally:
                 await self._stop_keepalive(keepalive)
                 status_updates.cancel()
@@ -2965,7 +3040,8 @@ class TelegramCodexOperator:
         )
         text = (
             "BaseClaw help menu.\n"
-            "Use the buttons below for common operator actions."
+            "Use the buttons below for common operator actions.\n"
+            "Tip: /read makes a voice note from my last reply. Reply to a message with /read to read that message, or send /read next to read only my next reply."
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
 
@@ -3093,6 +3169,85 @@ class TelegramCodexOperator:
 
     async def voice_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._set_voice_replies(update, context, enabled=False)
+
+    def _read_text_from_replied_message(self, update: Update) -> str:
+        if not update.message or not update.message.reply_to_message or not update.effective_chat:
+            return ""
+        reply = update.message.reply_to_message
+        record = self.message_store.find_by_telegram_message_id(
+            chat_id=update.effective_chat.id,
+            telegram_message_id=reply.message_id,
+        )
+        if record:
+            return readable_message_text(
+                record.get("text"),
+                record.get("transcript"),
+                json.dumps(record.get("metadata") or {}, ensure_ascii=True),
+            )
+        for value in (getattr(reply, "text", None), getattr(reply, "caption", None)):
+            if value and value.strip():
+                return value.strip()
+        return ""
+
+    async def _send_read_voice(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> bool:
+        spoken_text = spoken_reply_text(text)
+        if not spoken_text:
+            await self._send_text_message(context, chat_id, "I could not find readable text for that message.", event_type="command_read_empty")
+            return False
+        try:
+            await self._send_voice_reply(context, chat_id, spoken_text, caption=None, force=True)
+            return True
+        except Exception as exc:
+            LOGGER.exception("/read voice generation failed chat_id=%s", chat_id)
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"I could not create the voice note: {friendly_voice_error(exc)}",
+                event_type="command_read_error",
+            )
+            return False
+
+    async def read_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        message_text = update.effective_message.text if update.effective_message else "/read"
+        self._record_incoming_message(
+            update,
+            event_type="command_read",
+            message_type="command",
+            text=message_text,
+        )
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+
+        _, _, args = (message_text or "/read").partition(" ")
+        args_lower = " ".join(args.lower().strip().split())
+
+        reply_text = self._read_text_from_replied_message(update)
+        if reply_text:
+            await self._send_read_voice(context, chat_id, reply_text)
+            return
+
+        if args_lower in {"next", "next response", "the next response", "my next response", "read next"}:
+            self.state.arm_read_next(chat_id)
+            await self._send_text_message(
+                context,
+                chat_id,
+                "Okay. I will read my next reply once, then go back to normal text replies.",
+                event_type="command_read_next_armed",
+            )
+            return
+
+        latest = self.message_store.latest_assistant_reply_text(chat_id=chat_id)
+        if not latest:
+            await self._send_text_message(
+                context,
+                chat_id,
+                "I do not have a previous assistant reply to read yet.",
+                event_type="command_read_no_previous",
+            )
+            return
+        await self._send_read_voice(context, chat_id, latest)
 
     async def _set_voice_replies(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
         chat_id = update.effective_chat.id
@@ -4238,6 +4393,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("voice_status", operator.voice_status))
     application.add_handler(CommandHandler("voice_on", operator.voice_on))
     application.add_handler(CommandHandler("voice_off", operator.voice_off))
+    application.add_handler(CommandHandler("read", operator.read_command))
     application.add_handler(CommandHandler("update", operator.update_from_source))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
