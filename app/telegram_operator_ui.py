@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 import customtkinter as ctk
 import psutil
-from codex_cli import resolve_codex_command
+from harnesses.codex import resolve_codex_command
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent

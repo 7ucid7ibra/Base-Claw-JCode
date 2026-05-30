@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
-from codex_cli import resolve_codex_command
+from harnesses.codex import resolve_codex_command
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
