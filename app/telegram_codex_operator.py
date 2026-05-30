@@ -3031,23 +3031,102 @@ class TelegramCodexOperator:
             [
                 [
                     InlineKeyboardButton("Status", callback_data="menu:status"),
-                    InlineKeyboardButton("Voice", callback_data="menu:voice"),
+                    InlineKeyboardButton("Commands", callback_data="menu:commands"),
                 ],
                 [
-                    InlineKeyboardButton("Voice status", callback_data="menu:voice_status"),
+                    InlineKeyboardButton("Voice picker", callback_data="menu:voice"),
+                    InlineKeyboardButton("Voice on", callback_data="menu:voice_on"),
+                    InlineKeyboardButton("Voice off", callback_data="menu:voice_off"),
                 ],
                 [
+                    InlineKeyboardButton("Read help", callback_data="menu:read"),
+                    InlineKeyboardButton("Attachments", callback_data="menu:attachments"),
+                ],
+                [
+                    InlineKeyboardButton("Update", callback_data="menu:update"),
                     InlineKeyboardButton("Restart", callback_data="menu:restart"),
+                ],
+                [
                     InlineKeyboardButton("Reset session", callback_data="menu:reset"),
+                    InlineKeyboardButton("Workspace", callback_data="menu:workspace"),
                 ],
             ]
         )
         text = (
-            "BaseClaw help menu.\n"
-            "Use the buttons below for common operator actions.\n"
-            "Tip: /read makes a voice note from my last reply. Reply to a message with /read to read that message, or send /read next to read only my next reply."
+            "BaseClaw command center.\n\n"
+            "Use the buttons for common controls, or send a command directly.\n\n"
+            "Most used commands:\n"
+            "/status - show current setup\n"
+            "/read - make a voice note from my last reply\n"
+            "/read next - read only my next reply\n"
+            "/voice_on and /voice_off - control automatic voice replies\n"
+            "/update - pull the configured source update\n"
+            "/restart - restart the Telegram operator\n"
+            "/reset - clear this chat's agent session"
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
+
+    def _voice_status_text(self) -> str:
+        return (
+            f"Automatic voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
+            f"Current voice: {self.config.kokoro_voice}\n\n"
+            "/voice opens the voice picker.\n"
+            "/voice_on enables automatic voice replies.\n"
+            "/voice_off keeps replies as text unless you use /read."
+        )
+
+    def _read_help_text(self) -> str:
+        return (
+            "Read commands:\n\n"
+            "/read\n"
+            "Creates a voice note from my latest assistant reply.\n\n"
+            "Reply to a message with /read\n"
+            "Creates a voice note from that replied-to message.\n\n"
+            "/read next\n"
+            "Reads only my next reply as a voice note, then goes back to normal text replies.\n\n"
+            "This works even when automatic voice replies are off."
+        )
+
+    def _commands_help_text(self) -> str:
+        return (
+            "Built-in commands:\n\n"
+            "/start - show startup/status summary\n"
+            "/help - open this command center\n"
+            "/status - show provider, model, paths, session, voice, and safety settings\n"
+            "/reset - clear this chat's persisted agent session after confirmation\n"
+            "/voice - choose a Kokoro voice\n"
+            "/voice_status - show current voice settings\n"
+            "/voice_on - enable automatic voice replies\n"
+            "/voice_off - disable automatic voice replies\n"
+            "/read - create a voice note from a previous or next reply\n"
+            "/update - pull the configured BaseClaw source update after confirmation\n"
+            "/restart - restart the Telegram operator\n"
+            "/restart_operator - same as /restart"
+        )
+
+    def _attachments_help_text(self) -> str:
+        return (
+            "Attachments:\n\n"
+            "You can send text, voice notes, photos, PDFs, documents, and videos.\n\n"
+            "Voice notes are transcribed before they are passed into the agent.\n"
+            "Images and files are saved locally and included as context.\n"
+            "Replying to an older message gives me that message as context.\n\n"
+            "For file delivery back to you, I create the file locally and hand it to the Telegram bridge."
+        )
+
+    def _workspace_help_text(self, chat_id: int) -> str:
+        session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
+        allowed_paths = ", ".join(str(path) for path in self.config.allowed_paths) or "none"
+        return (
+            "Workspace and safety:\n\n"
+            f"Workdir: {self.config.workdir}\n"
+            f"Session: {session_id or 'none'}\n"
+            f"Access scope: {self.config.access_scope}\n"
+            f"Action mode: {self.config.action_mode}\n"
+            f"Legacy safety mode: {self.config.safety_mode}\n"
+            f"Allowed paths: {allowed_paths}\n\n"
+            "Local skills, automations, scratch work, uploads, and artifacts belong in the agent workspace, not in public BaseClaw core."
+        )
 
     def _available_voices(self) -> list[str]:
         voices: list[str] = []
@@ -3164,7 +3243,7 @@ class TelegramCodexOperator:
         await self._send_text_message(
             context,
             chat_id,
-            f"Voice replies are {'enabled' if self.config.voice_replies_enabled else 'disabled'}. Current voice: {self.config.kokoro_voice}.",
+            self._voice_status_text(),
             event_type="command_voice_status_reply",
         )
 
@@ -4212,8 +4291,53 @@ class TelegramCodexOperator:
             await self._send_text_message(
                 context,
                 chat_id,
-                f"Voice replies are {'enabled' if self.config.voice_replies_enabled else 'disabled'}. Current voice: {self.config.kokoro_voice}.",
+                self._voice_status_text(),
                 event_type="menu_voice_status_reply",
+            )
+            return
+        if action == "voice_on" or action == "voice_off":
+            enabled = action == "voice_on"
+            self.config.voice_replies_enabled = enabled
+            await asyncio.to_thread(
+                update_operator_env,
+                {"TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED": "true" if enabled else "false"},
+            )
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Voice replies {'enabled' if enabled else 'disabled'}. This is active now and saved for restart.",
+                event_type=f"menu_{action}_reply",
+            )
+            return
+        if action == "read":
+            await self._send_text_message(context, chat_id, self._read_help_text(), event_type="menu_read_help")
+            return
+        if action == "commands":
+            await self._send_text_message(context, chat_id, self._commands_help_text(), event_type="menu_commands_help")
+            return
+        if action == "attachments":
+            await self._send_text_message(context, chat_id, self._attachments_help_text(), event_type="menu_attachments_help")
+            return
+        if action == "workspace":
+            await self._send_text_message(context, chat_id, self._workspace_help_text(chat_id), event_type="menu_workspace_help")
+            return
+        if action == "update":
+            ref = self._manual_update_ref()
+            self.pending_manual_updates[chat_id] = ref
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
+                        InlineKeyboardButton("Cancel", callback_data="update:cancel"),
+                    ]
+                ]
+            )
+            await self._send_text_message(
+                context,
+                chat_id,
+                self._manual_update_summary(ref),
+                event_type="menu_update_confirm",
+                reply_markup=keyboard,
             )
             return
         if action == "restart":
