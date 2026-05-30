@@ -3738,8 +3738,12 @@ class OperatorUi(ctk.CTk):
         if repo.endswith(".git"):
             repo = repo[:-4]
         branch = "main"
-        if len(path_parts) >= 5 and path_parts[2] in {"tree", "blob"}:
-            branch = path_parts[3]
+        if len(path_parts) >= 4 and path_parts[2] in {"tree", "blob"}:
+            branch_parts = path_parts[3:]
+            if len(branch_parts) > 1 and branch_parts[-1].lower() == "update":
+                branch_parts = branch_parts[:-1]
+            if branch_parts:
+                branch = "/".join(branch_parts)
         return owner, repo, branch
 
     def _download_github_archive(self, repo: tuple[str, str, str], tmp_path: Path) -> tuple[Path, str]:
