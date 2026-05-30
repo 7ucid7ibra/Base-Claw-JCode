@@ -2477,30 +2477,34 @@ class TelegramCodexOperator:
     ) -> None:
         if not self.config.voice_replies_enabled and not force:
             return
-        with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
-            tmp_path = Path(tmp)
-            last_error: Exception | None = None
-            for attempt in range(1, 4):
-                try:
-                    if attempt > 1:
-                        await asyncio.sleep(1.2 * (attempt - 1))
-                    ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, tmp_path)
+        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.RECORD_VOICE))
+        try:
+            with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
+                tmp_path = Path(tmp)
+                last_error: Exception | None = None
+                for attempt in range(1, 4):
                     try:
-                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+                        if attempt > 1:
+                            await asyncio.sleep(1.2 * (attempt - 1))
+                        ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, tmp_path)
+                        try:
+                            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+                        except Exception as exc:
+                            LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
+                        with ogg_path.open("rb") as handle:
+                            sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+                        break
                     except Exception as exc:
-                        LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
-                    with ogg_path.open("rb") as handle:
-                        sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    LOGGER.warning("Voice reply attempt failed chat_id=%s attempt=%s error=%s", chat_id, attempt, exc)
-            else:
-                raise last_error or RuntimeError("voice reply failed")
-            self.message_store.append(
-                direction="out",
-                event_type="outgoing_voice_reply",
-                chat_id=chat_id,
+                        last_error = exc
+                        LOGGER.warning("Voice reply attempt failed chat_id=%s attempt=%s error=%s", chat_id, attempt, exc)
+                else:
+                    raise last_error or RuntimeError("voice reply failed")
+        finally:
+            await self._stop_keepalive(keepalive)
+        self.message_store.append(
+            direction="out",
+            event_type="outgoing_voice_reply",
+            chat_id=chat_id,
                 telegram_message_id=sent.message_id,
                 message_type="voice",
                 text=caption or "",
