@@ -53,8 +53,8 @@ cat > "$STAGE_ROOT/README-FIRST.txt" <<'TXT'
 BaseClaw macOS alpha package
 
 1. Copy the BaseClaw folder somewhere writable, for example Applications or Documents.
-2. Open BaseClaw/install-macos.command for first setup.
-3. Open BaseClaw/start-macos.command or BaseClaw/BaseClaw.app for daily startup.
+2. Open BaseClaw/launchers/macos/install-macos.command for first setup.
+3. Open BaseClaw/launchers/macos/start-macos.command or BaseClaw/BaseClaw.app for daily startup.
 
 This alpha DMG is not signed or notarized yet. If macOS blocks it, Control-click the command or app and choose Open.
 TXT

@@ -5,7 +5,7 @@ This folder is for optional local German Kokoro model assets.
 Expected layout:
 
 ```text
-german_kokoro/
+voice_assets/german/
   config.json
   kikiri_german_martin_ep10.pth
   voices/

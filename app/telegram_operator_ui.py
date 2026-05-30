@@ -16,9 +16,10 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
+from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import customtkinter as ctk
 import psutil
@@ -28,16 +29,84 @@ APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
 DEFAULT_WORKSPACE = PROJECT_ROOT / "agent_workspace"
+WORKSPACE_SUBDIRS = ("skills", "automations", "projects", "slash_commands", "notes", "scratch", "artifacts", "uploads")
 ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
 PROFILES_DIR = PROJECT_ROOT / "profiles"
 MAIN_PROFILE = "main"
 OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
 SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
+SPEECH_SCRIPT = PROJECT_ROOT / "scripts" / "speech_server.sh"
 LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
-UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw"
+UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
+APP_VERSION_PATH = PROJECT_ROOT / "VERSION"
+DEFAULT_UPDATE_SOURCE_URL = ""
+
+
+def _unquote_config_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _install_config_value(*keys: str) -> str:
+    config_path = PROJECT_ROOT / ".baseclaw-install.conf"
+    if not config_path.exists():
+        return ""
+    wanted = set(keys)
+    try:
+        lines = config_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() in wanted:
+            return _unquote_config_value(value)
+    return ""
+
+
+def _git_origin_update_source() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def configured_update_source_url() -> str:
+    return (
+        os.environ.get("BASECLAW_UPDATE_SOURCE_URL", "").strip()
+        or os.environ.get("BASECLAW_UPDATE_SOURCE", "").strip()
+        or _install_config_value("BASECLAW_UPDATE_SOURCE_URL", "BASECLAW_UPDATE_SOURCE")
+        or _git_origin_update_source()
+        or DEFAULT_UPDATE_SOURCE_URL
+    )
+
+
+UPDATE_SOURCE_URL = configured_update_source_url()
+
+
+def read_app_version(path: Path = APP_VERSION_PATH) -> str:
+    try:
+        version = path.read_text(encoding="utf-8").strip().splitlines()[0].strip()
+    except (OSError, IndexError):
+        version = ""
+    return version or "dev"
+
+
 SECRET_PATTERNS = [
     re.compile(r"(bot)([0-9]{6,}:[A-Za-z0-9_-]{20,})"),
 ]
+BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
 ENV_KEYS = [
     "TELEGRAM_BOT_TOKEN",
@@ -80,21 +149,6 @@ ENV_KEYS = [
     "TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL",
     "TELEGRAM_OPERATOR_SUPERVISOR_CORE_PURPOSE",
     "TELEGRAM_OPERATOR_SUPERVISOR_DO_NOT",
-    "TELEGRAM_OPERATOR_HISTORY_AGENT",
-    "TELEGRAM_OPERATOR_HISTORY_DEVICE",
-    "TELEGRAM_OPERATOR_HISTORY_REMOTE",
-    "TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH",
-    "TELEGRAM_OPERATOR_HISTORY_SSH_KEY",
-    "TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS",
-    "TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT",
-    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED",
-    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS",
-    "TELEGRAM_OPERATOR_BOARD_POLL_ENABLED",
-    "TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS",
-    "TELEGRAM_OPERATOR_BOARD_REMOTE",
-    "TELEGRAM_OPERATOR_BOARD_PATH",
-    "TELEGRAM_OPERATOR_BOARD_STATE_PATH",
-    "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL",
@@ -133,7 +187,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS": "900",
     "TELEGRAM_OPERATOR_CODEX_MODEL": "qwen3-coder-30b",
     "TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE": "",
-    "TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED": "false",
+    "TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED": "true",
     "TELEGRAM_OPERATOR_SHARED_CONTEXT_LIMIT": "12",
     "TELEGRAM_OPERATOR_SAFETY_MODE": "safe",
     "TELEGRAM_OPERATOR_SAFE_MODE": "false",
@@ -143,21 +197,6 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL": "",
     "TELEGRAM_OPERATOR_SUPERVISOR_CORE_PURPOSE": "",
     "TELEGRAM_OPERATOR_SUPERVISOR_DO_NOT": "Do not infer identity from stale chat memory,Do not review your own source update as independent review",
-    "TELEGRAM_OPERATOR_HISTORY_AGENT": "",
-    "TELEGRAM_OPERATOR_HISTORY_DEVICE": "",
-    "TELEGRAM_OPERATOR_HISTORY_REMOTE": "",
-    "TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH": "",
-    "TELEGRAM_OPERATOR_HISTORY_SSH_KEY": "",
-    "TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS": "",
-    "TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT": "250",
-    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED": "true",
-    "TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS": "300",
-    "TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true",
-    "TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS": "180",
-    "TELEGRAM_OPERATOR_BOARD_REMOTE": "",
-    "TELEGRAM_OPERATOR_BOARD_PATH": "",
-    "TELEGRAM_OPERATOR_BOARD_STATE_PATH": str(BASE_DIR / "telegram_operator_board_state.json"),
-    "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES": "",
     "TELEGRAM_OPERATOR_LOCAL_VISION_ENABLED": "false",
     "TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL": "http://127.0.0.1:1234/v1",
     "TELEGRAM_OPERATOR_LM_STUDIO_VISION_MODEL": "",
@@ -167,11 +206,51 @@ DEFAULTS = {
 
 CODEX_MODELS = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2"]
 CLAUDE_MODELS = ["", "sonnet", "opus", "claude-sonnet-4-6", "claude-opus-4-6"]
-GEMINI_MODELS = ["", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+GEMINI_FALLBACK_MODELS = [
+    "",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+GEMINI_MODEL_RE = re.compile(r"\bgemini-(?:1\.5|2(?:\.\d+)?|3(?:\.\d+)?)(?:-[a-z0-9]+)*\b")
 JCODE_MODELS = ["qwen3-coder-30b", "qwen/qwen3-coder-30b"]
 PROVIDERS = ["jcode", "codex", "claude", "gemini"]
 CLOUD_HARNESSES = ["codex", "claude", "gemini"]
 LOCAL_HARNESSES = ["jcode"]
+DEFAULT_KOKORO_VOICES = [
+    "af_alloy",
+    "af_aoede",
+    "af_bella",
+    "af_heart",
+    "af_jessica",
+    "af_kore",
+    "af_nicole",
+    "af_nova",
+    "af_river",
+    "af_sarah",
+    "af_sky",
+    "am_adam",
+    "am_echo",
+    "am_eric",
+    "am_fenrir",
+    "am_liam",
+    "am_michael",
+    "am_onyx",
+    "am_puck",
+    "am_santa",
+    "bf_alice",
+    "bf_emma",
+    "bf_isabella",
+    "bf_lily",
+    "bm_daniel",
+    "bm_fable",
+    "bm_george",
+    "bm_lewis",
+]
 RUN_MODE_LABELS = {
     "local": "Local mode",
     "cloud": "Cloud provider mode",
@@ -352,6 +431,23 @@ def write_env(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+def normalize_bot_token(value: str) -> str:
+    token = re.sub(r"\s+", "", value.strip())
+    half = len(token) // 2
+    if len(token) % 2 == 0 and half and token[:half] == token[half:] and BOT_TOKEN_RE.fullmatch(token[:half]):
+        return token[:half]
+    return token
+
+
+def bot_token_validation_error(value: str) -> str:
+    token = normalize_bot_token(value)
+    if not token:
+        return "Bot token is missing. Paste one token from BotFather before starting this profile."
+    if not BOT_TOKEN_RE.fullmatch(token):
+        return "Bot token looks invalid. Paste exactly one token from BotFather; do not paste it twice."
+    return ""
+
+
 def redact_secrets(text: str) -> str:
     redacted = text
     for pattern in SECRET_PATTERNS:
@@ -440,6 +536,152 @@ def gemini_preflight() -> tuple[bool, str]:
         return True, f"Gemini CLI found: {executable}"
     version = (result.stdout or result.stderr).strip() or "installed"
     return True, f"Gemini CLI: {version}"
+
+
+def provider_available(provider: str) -> bool:
+    provider = provider.strip().lower()
+    if provider == "jcode":
+        return shutil.which("jcode") is not None
+    if provider == "codex":
+        try:
+            resolve_codex_command()
+            return True
+        except Exception:
+            return False
+    if provider == "claude":
+        return shutil.which("claude") is not None
+    if provider == "gemini":
+        return shutil.which("gemini") is not None
+    return False
+
+
+def preferred_available_provider(preferred: str = "") -> str:
+    preferred = preferred.strip().lower()
+    if preferred in PROVIDERS and provider_available(preferred):
+        return preferred
+    for provider in ("codex", "gemini", "claude", "jcode"):
+        if provider_available(provider):
+            return provider
+    return preferred if preferred in PROVIDERS else "codex"
+
+
+def provider_run_mode(provider: str) -> str:
+    provider = provider.strip().lower()
+    return "cloud" if provider in CLOUD_HARNESSES else "local"
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _sort_gemini_models(models: list[str]) -> list[str]:
+    preferred = [
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro",
+        "gemini-3-pro",
+        "gemini-3-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+    ]
+    clean = [model for model in _dedupe_strings(models) if model]
+    preferred_present = [model for model in preferred if model in clean]
+    remaining = sorted(model for model in clean if model not in set(preferred_present))
+    return preferred_present + remaining
+
+
+def _gemini_api_models() -> list[str]:
+    api_key = (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or os.environ.get("GOOGLE_GENAI_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        return []
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?{urlencode({'key': api_key})}"
+    try:
+        request = Request(url, headers={"Accept": "application/json"})
+        with urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, json.JSONDecodeError):
+        return []
+    models = []
+    for item in payload.get("models", []):
+        methods = item.get("supportedGenerationMethods") or []
+        if methods and "generateContent" not in methods:
+            continue
+        model_id = str(item.get("name") or item.get("baseModelId") or "").strip()
+        if model_id.startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        if model_id.startswith("gemini-"):
+            models.append(model_id)
+    return models
+
+
+def _gemini_cli_bundle_roots() -> list[Path]:
+    roots: list[Path] = []
+    executable = shutil.which("gemini")
+    if executable:
+        try:
+            resolved = Path(executable).resolve()
+            roots.extend(parent / "node_modules" / "@google" / "gemini-cli" for parent in resolved.parents[:5])
+            roots.extend(parent / "@google" / "gemini-cli" for parent in resolved.parents[:5])
+        except OSError:
+            pass
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            result = subprocess.run(
+                [npm, "root", "-g"],
+                text=True,
+                capture_output=True,
+                timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            result = None
+        if result and result.returncode == 0:
+            npm_root_text = (result.stdout or "").strip()
+            if npm_root_text:
+                roots.append(Path(npm_root_text) / "@google" / "gemini-cli")
+    return [Path(root) for root in _dedupe_strings([str(root) for root in roots]) if Path(root).exists()]
+
+
+def _gemini_cli_bundle_models() -> list[str]:
+    models: list[str] = []
+    for root_text in _gemini_cli_bundle_roots():
+        root = Path(root_text)
+        search_roots = [root / "bundle", root / "dist", root]
+        for search_root in search_roots:
+            if not search_root.exists():
+                continue
+            for path in search_root.rglob("*.js"):
+                try:
+                    text = path.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for model_id in GEMINI_MODEL_RE.findall(text):
+                    if "9001" in model_id or model_id.endswith("-base"):
+                        continue
+                    models.append(model_id)
+    return models
+
+
+def gemini_model_options() -> list[str]:
+    discovered = _sort_gemini_models([*_gemini_api_models(), *_gemini_cli_bundle_models()])
+    return ["", *(discovered or [model for model in GEMINI_FALLBACK_MODELS if model])]
 
 
 def normalize_speech_url(url: str) -> str:
@@ -543,27 +785,146 @@ def local_speech_urls() -> list[str]:
     return unique
 
 
+def local_speech_python_path() -> Path:
+    if sys.platform.startswith("win"):
+        python = BASE_DIR / ".venv-kokoro" / "Scripts" / "pythonw.exe"
+        if not python.exists():
+            python = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
+        return python
+    return BASE_DIR / ".venv-kokoro" / "bin" / "python"
+
+
+def local_whisper_python_path() -> Path:
+    if sys.platform.startswith("win"):
+        return BASE_DIR / ".venv-whisper" / "Scripts" / "python.exe"
+    return BASE_DIR / ".venv-whisper" / "bin" / "python"
+
+
+def local_speech_installed() -> bool:
+    return local_speech_python_path().exists() and local_whisper_python_path().exists()
+
+
+def local_speech_state() -> tuple[str, str]:
+    if speech_health(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]):
+        return "running", "Local speech server is running."
+    if local_speech_installed():
+        return "stopped", "Local speech support is installed."
+    return "not_installed", "Local speech support is not installed."
+
+
+def write_local_speech_installed_flag() -> None:
+    config_path = PROJECT_ROOT / ".baseclaw-install.conf"
+    lines = []
+    if config_path.exists():
+        try:
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            lines = []
+    replaced = False
+    next_lines = []
+    for line in lines:
+        if line.startswith("BASECLAW_WITH_KOKORO="):
+            next_lines.append("BASECLAW_WITH_KOKORO=1")
+            replaced = True
+        else:
+            next_lines.append(line)
+    if not replaced:
+        if next_lines and next_lines[-1].strip():
+            next_lines.append("")
+        next_lines.append("BASECLAW_WITH_KOKORO=1")
+    config_path.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
+
+
+def run_speech_script(action: str, timeout: int = 120) -> tuple[bool, str]:
+    if sys.platform.startswith("win") or not SPEECH_SCRIPT.exists():
+        return False, "Speech helper script is only available on macOS/Linux."
+    result = subprocess.run(
+        ["bash", str(SPEECH_SCRIPT), action],
+        cwd=str(BASE_DIR),
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+    )
+    detail = (result.stdout or result.stderr).strip()
+    return result.returncode == 0, detail or f"speech_server.sh {action} exited with {result.returncode}"
+
+
+def local_speech_venv_command() -> list[str]:
+    if sys.platform.startswith("win"):
+        # Windows commonly exposes Microsoft Store/App Execution Alias stubs at
+        # WindowsApps/python3.exe. They can appear in PATH but fail for venv
+        # creation with exit code 9009. The UI itself is already running under a
+        # working Python, so prefer that interpreter for local speech venvs.
+        return [sys.executable]
+    candidate = shutil.which("python3.12") or shutil.which("python3.11") or shutil.which("python3")
+    return [candidate or sys.executable]
+
+
+def install_local_speech_host() -> tuple[bool, str]:
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("install", timeout=900)
+    py = local_speech_venv_command()
+    venv = BASE_DIR / ".venv-kokoro"
+    if not venv.exists():
+        subprocess.run([*py, "-m", "venv", str(venv)], cwd=str(BASE_DIR), check=True, timeout=120)
+    python = local_speech_python_path()
+    if not python.exists():
+        return False, "Could not create the local speech virtual environment."
+    subprocess.run([str(python), "-m", "pip", "install", "--upgrade", "pip", "wheel"], cwd=str(BASE_DIR), check=True, timeout=300)
+    subprocess.run([str(python), "-m", "pip", "install", "-r", "requirements/kokoro.txt"], cwd=str(BASE_DIR), check=True, timeout=900)
+    whisper_venv = BASE_DIR / ".venv-whisper"
+    if not whisper_venv.exists():
+        subprocess.run([*py, "-m", "venv", str(whisper_venv)], cwd=str(BASE_DIR), check=True, timeout=120)
+    whisper_python = local_whisper_python_path()
+    if not whisper_python.exists():
+        return False, "Could not create the local Whisper virtual environment."
+    subprocess.run([str(whisper_python), "-m", "pip", "install", "--upgrade", "pip", "wheel"], cwd=str(BASE_DIR), check=True, timeout=300)
+    subprocess.run([str(whisper_python), "-m", "pip", "install", "-r", "requirements/whisper.txt"], cwd=str(BASE_DIR), check=True, timeout=900)
+    write_local_speech_installed_flag()
+    return True, "Local speech support installed."
+
+
 def start_local_speech_host() -> tuple[bool, str]:
     for url in local_speech_urls():
         if speech_health(url):
             return True, f"Local speech host is already running at {url}."
-    python = BASE_DIR / ".venv-kokoro" / "Scripts" / "pythonw.exe"
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("start")
+    python = local_speech_python_path()
     if not python.exists():
-        python = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
-    if not python.exists():
-        return False, "Local speech fallback is enabled, but .venv-kokoro was not found. Start a remote host or install host mode."
+        return False, "Local speech support is not installed."
     script = APP_DIR / "kokoro_server.py"
-    subprocess.Popen(
-        [str(python), str(script)],
-        cwd=str(BASE_DIR),
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    kwargs: dict[str, Any] = {"cwd": str(BASE_DIR)}
+    if sys.platform.startswith("win"):
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([str(python), str(script)], **kwargs)
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         if speech_health(DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]):
             return True, "Started local speech host."
         time.sleep(1)
     return False, "Timed out waiting for local speech host on 127.0.0.1:8766."
+
+
+def stop_local_speech_host() -> tuple[bool, str]:
+    if not sys.platform.startswith("win") and SPEECH_SCRIPT.exists():
+        return run_speech_script("stop")
+    stopped = 0
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = " ".join(process.info.get("cmdline") or [])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if "kokoro_server.py" not in cmdline:
+            continue
+        try:
+            process.terminate()
+            stopped += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return True, f"Stopped {stopped} local speech process(es)."
 
 
 def language_display(value: str) -> str:
@@ -695,6 +1056,12 @@ def profile_workdir(profile: str) -> Path:
     return profile_dir(profile) / "agent_workspace"
 
 
+def ensure_workspace_layout(workdir: Path) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
+    for name in WORKSPACE_SUBDIRS:
+        (workdir / name).mkdir(exist_ok=True)
+
+
 def list_profiles() -> list[str]:
     profiles = [MAIN_PROFILE]
     if PROFILES_DIR.exists():
@@ -801,8 +1168,12 @@ class OperatorUi(ctk.CTk):
         self.profile_combo: ctk.CTkComboBox | None = None
         self.values = self._profile_values(self.profile_name)
         self.vars: dict[str, tk.StringVar] = {}
+        self.version_label: ctk.CTkLabel | None = None
         self.voice_combo: ctk.CTkComboBox | None = None
         self.whisper_combo: ctk.CTkComboBox | None = None
+        self.speech_status_label: ctk.CTkLabel | None = None
+        self.speech_action_button: ctk.CTkButton | None = None
+        self.speech_action_running = False
         self.harness_combo: ctk.CTkComboBox | None = None
         self.local_provider_label: ctk.CTkLabel | None = None
         self.local_provider_combo: ctk.CTkComboBox | None = None
@@ -819,8 +1190,12 @@ class OperatorUi(ctk.CTk):
         self.status_pill: ctk.CTkLabel | None = None
         self.status_detail: ctk.CTkLabel | None = None
         self.update_button: ctk.CTkButton | None = None
+        self.update_check_running = False
+        self.update_available = False
+        self.update_detail = ""
         self.start_button: ctk.CTkButton | None = None
-        self.stop_button: ctk.CTkButton | None = None
+        self.bridge_running: bool | None = None
+        self.bridge_button_hovered = False
         self.restart_button: ctk.CTkButton | None = None
         self.send_button: ctk.CTkButton | None = None
         self.thinking_label: ctk.CTkLabel | None = None
@@ -833,6 +1208,7 @@ class OperatorUi(ctk.CTk):
         self.settings_button: ctk.CTkButton | None = None
         self.settings_window: ctk.CTkToplevel | None = None
         self.settings_frame: ctk.CTkScrollableFrame | None = None
+        self.active_scroll_canvas: tk.Canvas | None = None
         self.settings_visible = False
         self.last_chat_row_id = -1
         self.chat_busy = False
@@ -840,14 +1216,20 @@ class OperatorUi(ctk.CTk):
         self.autosave_after_id: str | None = None
         self.entry_labels: dict[str, ctk.CTkLabel] = {}
         self.tooltips: list[Tooltip] = []
+        self.bind_all("<MouseWheel>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._on_global_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._on_global_mousewheel, add="+")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build()
         self._wire_autosave()
         self.autosave_ready = True
         self.refresh_voices()
+        self.refresh_speech_server_status()
+        self.refresh_version_label()
         self.refresh_status()
         self.refresh_chat_history()
         self.after(900, self.send_ui_startup_notice)
+        self.after(2200, self.check_for_updates)
         self.after(5000, self.auto_refresh_status)
 
     @property
@@ -870,6 +1252,10 @@ class OperatorUi(ctk.CTk):
     def _refresh_profile_combo(self) -> None:
         if self.profile_combo:
             self.profile_combo.configure(values=list_profiles())
+
+    def refresh_version_label(self) -> None:
+        if self.version_label:
+            self.version_label.configure(text=f"Version {read_app_version()}")
 
     def create_profile(self) -> None:
         if self.chat_busy:
@@ -896,7 +1282,7 @@ class OperatorUi(ctk.CTk):
         values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(profile_sqlite_path(profile))
         values["TELEGRAM_OPERATOR_LOG_PATH"] = str(profile_log_path(profile))
         target_env.parent.mkdir(parents=True, exist_ok=True)
-        profile_workdir(profile).mkdir(parents=True, exist_ok=True)
+        ensure_workspace_layout(profile_workdir(profile))
         write_env(target_env, values)
         self._refresh_profile_combo()
         self.profile_var.set(profile)
@@ -966,6 +1352,13 @@ class OperatorUi(ctk.CTk):
 
         title = ctk.CTkLabel(header, text="BaseClaw", font=ctk.CTkFont(size=26, weight="bold"))
         title.grid(row=0, column=0, sticky="w")
+        self.version_label = ctk.CTkLabel(
+            header,
+            text=f"Version {read_app_version()}",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        )
+        self.version_label.grid(row=0, column=0, sticky="w", padx=(126, 0), pady=(8, 0))
         subtitle = ctk.CTkLabel(
             header,
             text="Local agent bridge for Telegram, desktop chat, speech, and safe controls.",
@@ -1067,12 +1460,10 @@ class OperatorUi(ctk.CTk):
         self.llm_port_label = self.entry_labels.get("TELEGRAM_OPERATOR_LLM_PORT")
 
         agent = self._card(settings_body, "Agent", "Harness, model provider, workspace, and safety controls.", 3, 0)
-        provider = self.values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
-        if provider not in PROVIDERS:
-            provider = "jcode"
+        provider = preferred_available_provider(self.values.get("TELEGRAM_OPERATOR_PROVIDER", ""))
         run_mode = self.values.get("TELEGRAM_OPERATOR_RUN_MODE", "").strip()
-        if not run_mode:
-            run_mode = "cloud" if provider in CLOUD_HARNESSES else "local"
+        if not run_mode or (provider != "jcode" and run_mode == "local"):
+            run_mode = provider_run_mode(provider)
         model_provider = self.values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip() or "lmstudio"
         self.vars["TELEGRAM_OPERATOR_RUN_MODE"] = tk.StringVar(value=run_mode_display(run_mode))
         self.vars["TELEGRAM_OPERATOR_MODEL_PROVIDER"] = tk.StringVar(value=model_provider_display(model_provider))
@@ -1208,9 +1599,28 @@ class OperatorUi(ctk.CTk):
         self.vars["TELEGRAM_OPERATOR_KOKORO_VOICE"] = tk.StringVar(
             value=self.values.get("TELEGRAM_OPERATOR_KOKORO_VOICE", DEFAULTS["TELEGRAM_OPERATOR_KOKORO_VOICE"])
         )
-        self._label(voice, "Voice", row=0)
+        speech_header = ctk.CTkFrame(voice, fg_color="transparent")
+        speech_header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        speech_header.grid_columnconfigure(0, weight=1)
+        self.speech_status_label = ctk.CTkLabel(
+            speech_header,
+            text="Local speech: checking",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12),
+        )
+        self.speech_status_label.grid(row=0, column=0, sticky="w")
+        self.speech_action_button = ctk.CTkButton(
+            speech_header,
+            text="Start server",
+            width=148,
+            height=34,
+            corner_radius=10,
+            command=self.on_speech_action,
+        )
+        self.speech_action_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self._label(voice, "Voice", row=1)
         voice_row = ctk.CTkFrame(voice, fg_color="transparent")
-        voice_row.grid(row=1, column=0, sticky="ew", pady=(3, 12))
+        voice_row.grid(row=2, column=0, sticky="ew", pady=(3, 12))
         voice_row.grid_columnconfigure(0, weight=1)
         self.voice_combo = ctk.CTkComboBox(
             voice_row,
@@ -1226,7 +1636,7 @@ class OperatorUi(ctk.CTk):
             row=0, column=1, padx=(8, 0)
         )
         voice_options = ctk.CTkFrame(voice, fg_color="transparent")
-        voice_options.grid(row=2, column=0, sticky="ew")
+        voice_options.grid(row=3, column=0, sticky="ew")
         voice_options.grid_columnconfigure((0, 1), weight=1, uniform="voice_options")
         self.vars["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = tk.StringVar(
             value=language_display(
@@ -1255,12 +1665,12 @@ class OperatorUi(ctk.CTk):
             border_width=1,
         )
         self.whisper_combo.grid(row=1, column=1, sticky="ew", pady=(3, 12), padx=(6, 0))
-        self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=3)
+        self._switch(voice, "Voice replies enabled", "TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", row=4)
 
         runtime = self._card(settings_body, "Runtime", "Start, stop, update, and monitor the bridge.", 0, 0)
         buttons = ctk.CTkFrame(runtime, fg_color="transparent")
         buttons.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        buttons.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        buttons.grid_columnconfigure((0, 1, 2), weight=1)
         self.start_button = ctk.CTkButton(
             buttons,
             text="Start bridge",
@@ -1269,21 +1679,11 @@ class OperatorUi(ctk.CTk):
             fg_color=COLORS["accent"],
             hover_color=COLORS["accent_hover"],
             text_color=COLORS["accent_text"],
-            command=self.start_operator,
+            command=self.toggle_operator,
         )
-        self.start_button.grid(
-            row=0, column=0, sticky="ew", padx=(0, 6)
-        )
-        self.stop_button = ctk.CTkButton(
-            buttons,
-            text="Stop bridge",
-            height=40,
-            corner_radius=12,
-            fg_color=COLORS["danger"],
-            hover_color=COLORS["danger_hover"],
-            command=self.stop_operator,
-        )
-        self.stop_button.grid(row=0, column=1, sticky="ew", padx=6)
+        self.start_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.start_button.bind("<Enter>", self._bridge_button_enter, add="+")
+        self.start_button.bind("<Leave>", self._bridge_button_leave, add="+")
         self.restart_button = ctk.CTkButton(
             buttons,
             text="Restart",
@@ -1294,7 +1694,7 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
             command=self.restart_operator,
         )
-        self.restart_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+        self.restart_button.grid(row=0, column=1, sticky="ew", padx=6)
         self.update_button = ctk.CTkButton(
             buttons,
             text="Update",
@@ -1305,7 +1705,7 @@ class OperatorUi(ctk.CTk):
             text_color=COLORS["text"],
             command=self.update_from_source,
         )
-        self.update_button.grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        self.update_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
         self.status_detail = ctk.CTkLabel(runtime, text="Status: checking...", text_color=COLORS["muted"], anchor="w")
         self.status_detail.grid(row=1, column=0, sticky="ew")
 
@@ -1398,6 +1798,7 @@ class OperatorUi(ctk.CTk):
                 self.settings_button.configure(text="Settings")
 
     def _configure_scrollable_background(self, frame: ctk.CTkScrollableFrame) -> None:
+        canvas = getattr(frame, "_parent_canvas", None)
         for attr in ("_parent_canvas",):
             canvas = getattr(frame, attr, None)
             if canvas is not None:
@@ -1411,6 +1812,42 @@ class OperatorUi(ctk.CTk):
                 parent_frame.configure(fg_color=COLORS["bg"], border_color=COLORS["bg"])
             except tk.TclError:
                 pass
+        if canvas is not None:
+            targets = [canvas]
+            if parent_frame is not None:
+                targets.append(parent_frame)
+            for target in targets:
+                target.bind("<Enter>", lambda _event, scroll_canvas=canvas: self._set_active_scroll_canvas(scroll_canvas), add="+")
+                target.bind("<Leave>", lambda _event, scroll_canvas=canvas: self._clear_active_scroll_canvas(scroll_canvas), add="+")
+
+    def _set_active_scroll_canvas(self, canvas: tk.Canvas) -> None:
+        self.active_scroll_canvas = canvas
+
+    def _clear_active_scroll_canvas(self, canvas: tk.Canvas) -> None:
+        if self.active_scroll_canvas is canvas:
+            self.active_scroll_canvas = None
+
+    def _on_global_mousewheel(self, event: tk.Event) -> str | None:
+        canvas = self.active_scroll_canvas
+        if canvas is None:
+            return None
+        try:
+            if getattr(event, "num", None) == 4:
+                units = -3
+            elif getattr(event, "num", None) == 5:
+                units = 3
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta == 0:
+                    return None
+                divisor = 1 if sys.platform == "darwin" else 120
+                units = -int(delta / divisor)
+                if units == 0:
+                    units = -1 if delta > 0 else 1
+            canvas.yview_scroll(units, "units")
+            return "break"
+        except tk.TclError:
+            return None
 
     def _card(
         self,
@@ -1554,6 +1991,25 @@ class OperatorUi(ctk.CTk):
             existing.append(directory)
         current.set("; ".join(existing))
 
+    def remove_allowed_path(self) -> None:
+        current = self.vars.get("TELEGRAM_OPERATOR_ALLOWED_PATHS")
+        if current is None:
+            return
+        existing = [part.strip() for part in current.get().split(";") if part.strip()]
+        if not existing:
+            self.set_status("No paths", "There are no additional allowed paths to remove.", None)
+            return
+        if len(existing) == 1:
+            removed = existing.pop()
+        else:
+            prompt = "Number to remove:\n\n" + "\n".join(f"{index + 1}. {path}" for index, path in enumerate(existing))
+            index = simpledialog.askinteger("Remove allowed path", prompt, minvalue=1, maxvalue=len(existing), parent=self)
+            if index is None:
+                return
+            removed = existing.pop(index - 1)
+        current.set("; ".join(existing))
+        self.set_status("Path removed", f"Removed allowed path: {removed}", None)
+
     def on_run_mode_selected(self, _value: str | None = None) -> None:
         mode = run_mode_value(self.vars["TELEGRAM_OPERATOR_RUN_MODE"].get())
         self.vars["TELEGRAM_OPERATOR_RUN_MODE"].set(run_mode_display(mode))
@@ -1613,6 +2069,9 @@ class OperatorUi(ctk.CTk):
         )
         ctk.CTkButton(line, text="Add Path", width=92, height=38, corner_radius=10, command=self.choose_allowed_path).grid(
             row=0, column=1, padx=(8, 0)
+        )
+        ctk.CTkButton(line, text="Remove", width=82, height=38, corner_radius=10, command=self.remove_allowed_path).grid(
+            row=0, column=2, padx=(8, 0)
         )
 
     def on_provider_selected(self, _value: str | None = None) -> None:
@@ -1709,7 +2168,7 @@ class OperatorUi(ctk.CTk):
         elif provider == "claude":
             options = CLAUDE_MODELS
         elif provider == "gemini":
-            options = GEMINI_MODELS
+            options = gemini_model_options()
         else:
             options = ["", *JCODE_MODELS, *CODEX_MODELS]
         return options if model in options else [model, *options]
@@ -1786,6 +2245,7 @@ class OperatorUi(ctk.CTk):
         values = read_env(self.env_path)
         for key, var in self.vars.items():
             values[key] = var.get().strip()
+        values["TELEGRAM_BOT_TOKEN"] = normalize_bot_token(values.get("TELEGRAM_BOT_TOKEN", ""))
         values["TELEGRAM_OPERATOR_KOKORO_LANG_CODE"] = language_code(
             values.get("TELEGRAM_OPERATOR_KOKORO_LANG_CODE", "")
         )
@@ -1850,12 +2310,10 @@ class OperatorUi(ctk.CTk):
         self.autosave_ready = False
         try:
             values = self._profile_values(self.profile_name)
-            provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip() or "jcode"
-            if provider not in PROVIDERS:
-                provider = "jcode"
+            provider = preferred_available_provider(values.get("TELEGRAM_OPERATOR_PROVIDER", ""))
             run_mode = values.get("TELEGRAM_OPERATOR_RUN_MODE", "").strip()
-            if not run_mode:
-                run_mode = "cloud" if provider in CLOUD_HARNESSES else "local"
+            if not run_mode or (provider != "jcode" and run_mode == "local"):
+                run_mode = provider_run_mode(provider)
             model_provider = values.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip() or "lmstudio"
             safety_value = values.get("TELEGRAM_OPERATOR_SAFETY_MODE", "").strip()
             legacy = values.get("TELEGRAM_OPERATOR_SAFE_MODE", DEFAULTS["TELEGRAM_OPERATOR_SAFE_MODE"])
@@ -1894,34 +2352,96 @@ class OperatorUi(ctk.CTk):
         finally:
             self.autosave_ready = was_ready
 
+    def refresh_speech_server_status(self) -> None:
+        state, detail = local_speech_state()
+        if self.speech_status_label:
+            status_text = {
+                "running": "Local speech: running",
+                "stopped": "Local speech: stopped",
+                "not_installed": "Local speech: not installed",
+            }.get(state, "Local speech: unknown")
+            self.speech_status_label.configure(text=status_text)
+        if self.speech_action_button and not self.speech_action_running:
+            button_text = {
+                "running": "Stop server",
+                "stopped": "Start server",
+                "not_installed": "Install local speech",
+            }.get(state, "Refresh")
+            self.speech_action_button.configure(text=button_text, state="normal")
+    def on_speech_action(self) -> None:
+        if self.speech_action_running:
+            return
+        state, _detail = local_speech_state()
+        if state == "not_installed":
+            if not messagebox.askyesno(
+                "Install local speech",
+                "Install local Kokoro and Whisper speech dependencies now? This can take several minutes.",
+            ):
+                return
+            action = "install"
+            label = "Installing"
+            detail = "Installing local speech support..."
+        elif state == "running":
+            action = "stop"
+            label = "Stopping"
+            detail = "Stopping local speech server..."
+        else:
+            action = "start"
+            label = "Starting"
+            detail = "Starting local speech server..."
+
+        self.speech_action_running = True
+        if self.speech_action_button:
+            self.speech_action_button.configure(text=label, state="disabled")
+        self.set_status(label, detail, None)
+
+        def worker() -> None:
+            try:
+                if action == "install":
+                    ok, result = install_local_speech_host()
+                elif action == "stop":
+                    ok, result = stop_local_speech_host()
+                else:
+                    ok, result = start_local_speech_host()
+            except Exception as exc:
+                ok, result = False, str(exc)
+            self.after(0, lambda: self._finish_speech_action(action, ok, result))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_speech_action(self, action: str, ok: bool, detail: str) -> None:
+        self.speech_action_running = False
+        self.refresh_speech_server_status()
+        if ok:
+            label = "Speech installed" if action == "install" else "Speech stopped" if action == "stop" else "Speech running"
+            self.set_status(label, detail, True if action == "start" else None)
+            if action in {"install", "start"}:
+                self.refresh_voices()
+        else:
+            self.set_status("Speech failed", detail, False)
+            messagebox.showerror("Speech server", detail)
+
     def ensure_speech_ready(self, values: dict[str, str]) -> bool:
         voice_enabled = parse_bool(values.get("TELEGRAM_OPERATOR_VOICE_REPLIES_ENABLED", ""), True)
         remote = values.get("TELEGRAM_OPERATOR_REMOTE_SPEECH_URL", "").strip()
-        local_fallback = True
         if remote:
             if speech_health(remote):
                 return True
-        if local_fallback:
-            for url in local_speech_urls():
-                if speech_health(url):
-                    self.set_status("Speech ready", f"Using local speech host at {url}.", None)
-                    self.refresh_voices()
-                    return True
-            ok, detail = start_local_speech_host()
-            if not ok:
-                if voice_enabled:
-                    self._disable_voice_for_text_only_start(values, f"{detail} Starting text-only with voice replies disabled.")
-                else:
-                    self.set_status("Text-only", detail, None)
+        for url in local_speech_urls():
+            if speech_health(url):
+                self.set_status("Speech ready", f"Using local speech host at {url}.", None)
+                self.refresh_voices()
                 return True
-            self.set_status("Speech ready", detail, None)
-            self.refresh_voices()
-            return True
-        detail = "No STT/TTS host is configured. Starting text-only."
+        state, detail = local_speech_state()
+        if state == "not_installed":
+            detail = "Local speech is not installed. Starting text-only."
+        else:
+            detail = "Local speech server is stopped. Starting text-only."
         if voice_enabled:
             self._disable_voice_for_text_only_start(values, f"{detail} Voice replies are disabled until speech is configured.")
         else:
             self.set_status("Text-only", detail, None)
+        self.refresh_speech_server_status()
         return True
 
     def _disable_voice_for_text_only_start(self, values: dict[str, str], detail: str) -> None:
@@ -1939,6 +2459,43 @@ class OperatorUi(ctk.CTk):
             self.status_pill.configure(text=label, fg_color=color)
         if self.status_detail:
             self.status_detail.configure(text=detail)
+        if running is not None:
+            self.bridge_running = running
+            self._update_bridge_button()
+
+    def _bridge_button_enter(self, _event: tk.Event | None = None) -> None:
+        self.bridge_button_hovered = True
+        self._update_bridge_button()
+
+    def _bridge_button_leave(self, _event: tk.Event | None = None) -> None:
+        self.bridge_button_hovered = False
+        self._update_bridge_button()
+
+    def _update_bridge_button(self) -> None:
+        if not self.start_button:
+            return
+        if self.bridge_running:
+            if self.bridge_button_hovered:
+                self.start_button.configure(
+                    text="Stop bridge",
+                    fg_color=COLORS["danger"],
+                    hover_color=COLORS["danger_hover"],
+                    text_color="#FFFFFF",
+                )
+            else:
+                self.start_button.configure(
+                    text="Running",
+                    fg_color="#2F6B4E",
+                    hover_color=COLORS["danger_hover"],
+                    text_color="#FFFFFF",
+                )
+            return
+        self.start_button.configure(
+            text="Start bridge",
+            fg_color=COLORS["accent"],
+            hover_color=COLORS["accent_hover"],
+            text_color=COLORS["accent_text"],
+        )
 
     def _wire_autosave(self) -> None:
         for var in self.vars.values():
@@ -1998,6 +2555,7 @@ class OperatorUi(ctk.CTk):
             model = "Claude CLI default" if provider == "claude" else "Gemini CLI default" if provider == "gemini" else "Codex CLI default" if provider == "codex" else "JCode default"
         lines = [
             "BaseClaw UI opened.",
+            f"Version: {read_app_version()}",
             f"Mode: {run_mode}",
             f"Harness: {provider}",
             f"Model: {model}",
@@ -2032,7 +2590,7 @@ class OperatorUi(ctk.CTk):
             urls.append(remote)
         urls.extend(local_speech_urls())
 
-        voices = []
+        voices = list(DEFAULT_KOKORO_VOICES)
         seen_urls = set()
         for url in urls:
             url = url.rstrip("/")
@@ -2049,7 +2607,7 @@ class OperatorUi(ctk.CTk):
                         for nested in value.values():
                             if isinstance(nested, list):
                                 voices.extend(str(item) for item in nested)
-                if voices:
+                if len(voices) > len(DEFAULT_KOKORO_VOICES):
                     break
             except (OSError, URLError, json.JSONDecodeError):
                 continue
@@ -2073,7 +2631,50 @@ class OperatorUi(ctk.CTk):
 
     def auto_refresh_status(self) -> None:
         self.refresh_status()
+        if not self.speech_action_running:
+            self.refresh_speech_server_status()
         self.after(5000, self.auto_refresh_status)
+
+    def check_for_updates(self) -> None:
+        if self.update_check_running:
+            return
+        self.update_check_running = True
+
+        def worker() -> None:
+            try:
+                available, detail = self._check_update_source()
+            except Exception as exc:
+                available, detail = False, f"Update check failed: {exc}"
+            self.after(0, lambda: self._finish_update_check(available, detail))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check(self, available: bool, detail: str) -> None:
+        self.update_check_running = False
+        self.update_available = available
+        self.update_detail = detail
+        self._refresh_update_button()
+        if available:
+            self.set_status("Update available", detail, None)
+        self.after(30 * 60 * 1000, self.check_for_updates)
+
+    def _refresh_update_button(self) -> None:
+        if not self.update_button:
+            return
+        if self.update_available:
+            self.update_button.configure(
+                text="Update •",
+                fg_color=COLORS["accent"],
+                hover_color=COLORS["accent_hover"],
+                text_color=COLORS["accent_text"],
+            )
+        else:
+            self.update_button.configure(
+                text="Update",
+                fg_color=COLORS["panel_lift"],
+                hover_color=COLORS["border"],
+                text_color=COLORS["text"],
+            )
 
     def refresh_log(self) -> None:
         if not self.log_box:
@@ -2598,8 +3199,6 @@ class OperatorUi(ctk.CTk):
                     add_dirs = self._allowed_write_dirs(values, execution_dir)
                     for path in add_dirs[1:]:
                         cmd.extend(["--add-dir", str(path)])
-            if action_mode != "approve":
-                cmd.extend(["--ask-for-approval", "never"])
             model = values.get("TELEGRAM_OPERATOR_CODEX_MODEL", "").strip()
             if model and model != "default":
                 cmd.extend(["--model", model])
@@ -2754,10 +3353,22 @@ class OperatorUi(ctk.CTk):
             "Respect this policy even when the provider CLI cannot enforce it directly."
         )
 
+    def toggle_operator(self) -> None:
+        if root_operator_processes(self.env_path):
+            self.stop_operator()
+        else:
+            self.start_operator()
+
     def start_operator(self) -> None:
         self.save(show_message=False)
         values = self.current_values()
-        Path(values["TELEGRAM_OPERATOR_WORKDIR"]).mkdir(parents=True, exist_ok=True)
+        token_error = bot_token_validation_error(values.get("TELEGRAM_BOT_TOKEN", ""))
+        if token_error:
+            write_env(self.env_path, values)
+            self.set_status("Token invalid", token_error, False)
+            messagebox.showerror("Telegram token invalid", token_error)
+            return
+        ensure_workspace_layout(Path(values["TELEGRAM_OPERATOR_WORKDIR"]))
         provider = values.get("TELEGRAM_OPERATOR_PROVIDER", "").strip().lower()
         if provider == "jcode":
             jcode_ok, jcode_detail = jcode_preflight()
@@ -2820,6 +3431,9 @@ class OperatorUi(ctk.CTk):
         self.after(1500, self.refresh_status)
 
     def _kill_operator_processes(self, *, show_errors: bool = True) -> None:
+        self._kill_operator_processes_for_env(self.env_path, show_errors=show_errors)
+
+    def _kill_operator_processes_for_env(self, profile_env: Path, *, show_errors: bool = True) -> None:
         def kill_items(items: list[dict]) -> None:
             for item in items:
                 try:
@@ -2828,13 +3442,51 @@ class OperatorUi(ctk.CTk):
                     if show_errors:
                         messagebox.showerror("Stop failed", str(exc))
 
-        processes = operator_processes(self.env_path)
+        processes = operator_processes(profile_env)
         supervisors = [item for item in processes if SUPERVISOR_SCRIPT.name in item.get("CommandLine", "")]
         workers = [item for item in processes if item not in supervisors]
         kill_items(supervisors)
         kill_items(workers)
         time.sleep(0.4)
-        kill_items(operator_processes(self.env_path))
+        kill_items(operator_processes(profile_env))
+
+    def _running_operator_profiles(self) -> list[str]:
+        return [profile for profile in list_profiles() if root_operator_processes(profile_env_path(profile))]
+
+    def _start_operator_process_for_profile(self, profile: str) -> None:
+        profile_env = profile_env_path(profile)
+        values = self._profile_values(profile)
+        ensure_workspace_layout(Path(values["TELEGRAM_OPERATOR_WORKDIR"]))
+        env = dict(os.environ)
+        env["BASECLAW_OPERATOR_ENV_PATH"] = str(profile_env)
+        if sys.platform.startswith("win"):
+            powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
+            subprocess.Popen(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SUPERVISOR_SCRIPT), "-ProfileEnv", str(profile_env)],
+                cwd=str(BASE_DIR),
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        else:
+            subprocess.Popen(
+                [sys.executable, str(OPERATOR_SCRIPT), "--profile-env", str(profile_env)],
+                cwd=str(BASE_DIR),
+                env=env,
+                start_new_session=True,
+            )
+
+    def _restart_operator_profiles(self, profiles: list[str]) -> tuple[int, list[str]]:
+        restarted: list[str] = []
+        failed: list[str] = []
+        for profile in profiles:
+            profile_env = profile_env_path(profile)
+            try:
+                self._kill_operator_processes_for_env(profile_env, show_errors=False)
+                self._start_operator_process_for_profile(profile)
+                restarted.append(profile)
+            except Exception:
+                failed.append(profile)
+        return len(restarted), failed
 
     def stop_operator(self) -> None:
         self.set_status("Stopping", "Stopping operator...", None)
@@ -2849,9 +3501,10 @@ class OperatorUi(ctk.CTk):
     def update_from_source(self) -> None:
         self.save(show_message=False)
         source = UPDATE_SOURCE_URL
+        running_profiles = self._running_operator_profiles()
         if not messagebox.askyesno(
             "Update BaseClaw",
-            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nRestart the UI manually after it finishes.",
+            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nAfter a successful update, BaseClaw will restart {len(running_profiles)} running operator profile(s).",
         ):
             return
         if self.update_button:
@@ -2860,32 +3513,57 @@ class OperatorUi(ctk.CTk):
 
         def worker() -> None:
             ok, detail = self._pull_archive_update(source)
-            self.after(0, lambda: self._finish_update(ok, detail))
+            self.after(0, lambda: self._finish_update(ok, detail, running_profiles))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_update(self, ok: bool, detail: str) -> None:
+    def _finish_update(self, ok: bool, detail: str, running_profiles: list[str]) -> None:
         if self.update_button:
             self.update_button.configure(state="normal", text="Update")
         if ok:
-            self.set_status("Updated", detail, True)
-            messagebox.showinfo("Update complete", detail)
+            restart_detail = ""
+            if running_profiles:
+                restarted, failed = self._restart_operator_profiles(running_profiles)
+                restart_detail = f" Restarted {restarted} operator profile(s)."
+                if failed:
+                    restart_detail += f" Failed to restart: {', '.join(failed)}."
+            self.update_available = False
+            self.update_detail = ""
+            self._refresh_update_button()
+            self.set_status("Updated", detail + restart_detail, True)
+            restart = messagebox.askyesno(
+                "Update complete",
+                f"{detail}{restart_detail}\n\nRestart the BaseClaw UI now to load the updated interface?",
+            )
+            if restart:
+                self.restart_ui_process()
         else:
             self.set_status("Update failed", detail, False)
             messagebox.showerror("Update failed", detail)
 
+    def restart_ui_process(self) -> None:
+        self.save(show_message=False)
+        env = dict(os.environ)
+        env["BASECLAW_OPERATOR_ENV_PATH"] = str(self.env_path)
+        kwargs: dict[str, Any] = {
+            "cwd": str(BASE_DIR),
+            "env": env,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform.startswith("win"):
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, str(APP_DIR / "telegram_operator_ui.py")], **kwargs)
+        self.destroy()
+
     def _pull_archive_update(self, source: str) -> tuple[bool, str]:
         try:
+            backup_detail = ""
             if (PROJECT_ROOT / ".git").exists():
-                dirty = subprocess.run(
-                    ["git", "status", "--short"],
-                    cwd=str(PROJECT_ROOT),
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                )
-                if dirty.returncode == 0 and dirty.stdout.strip():
-                    return False, "Update blocked because the local git worktree has uncommitted changes."
+                backup_detail = self._backup_git_update_state()
 
             with tempfile.TemporaryDirectory(prefix="baseclaw-update-") as tmp:
                 tmp_path = Path(tmp)
@@ -2896,10 +3574,112 @@ class OperatorUi(ctk.CTk):
                     self._safe_extract(archive, extract_dir)
                 roots = [item for item in extract_dir.iterdir() if item.is_dir()]
                 source_root = roots[0] if len(roots) == 1 else extract_dir
+                updated_version = read_app_version(source_root / "VERSION")
                 copied = self._overlay_update(source_root)
-                return True, f"Updated from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code."
+                latest_commit = ""
+                github_repo = self._github_repo_from_source(source)
+                if github_repo:
+                    try:
+                        latest_commit = self._latest_github_commit(github_repo)
+                    except Exception:
+                        latest_commit = ""
+                self._write_update_version_marker(source, archive_name, latest_commit, updated_version)
+                self.refresh_version_label()
+                suffix = f" Local git changes were backed up in {backup_detail}." if backup_detail else ""
+                return True, f"Updated to {updated_version} from {archive_name}. Copied {copied} top-level item(s). Restart the UI manually to run the new code.{suffix}"
         except Exception as exc:
             return False, str(exc)
+
+    def _check_update_source(self) -> tuple[bool, str]:
+        github_repo = self._github_repo_from_source(UPDATE_SOURCE_URL)
+        if not github_repo:
+            return False, "Automatic update checks currently support GitHub update sources."
+        latest = self._latest_github_commit(github_repo)
+        latest_version = self._latest_github_version(github_repo)
+        current = self._current_update_commit(UPDATE_SOURCE_URL)
+        current_version = self._current_update_version(UPDATE_SOURCE_URL)
+        if not latest:
+            return False, "Could not read the latest GitHub commit."
+        short_latest = latest[:7]
+        if current and current == latest:
+            version_text = latest_version or current_version or "current version"
+            return False, f"BaseClaw is current at {version_text} ({short_latest})."
+        if current:
+            version_text = f" {latest_version}" if latest_version else ""
+            return True, f"New BaseClaw update available:{version_text} ({short_latest})."
+        version_text = f" {latest_version}" if latest_version else ""
+        return True, f"BaseClaw update available:{version_text} ({short_latest})."
+
+    def _current_update_commit(self, source: str) -> str:
+        marker = self._read_update_version_marker()
+        if marker.get("source") == source and marker.get("commit"):
+            return str(marker["commit"])
+        if (PROJECT_ROOT / ".git").exists():
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(PROJECT_ROOT),
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        return ""
+
+    def _current_update_version(self, source: str) -> str:
+        marker = self._read_update_version_marker()
+        if marker.get("source") == source and marker.get("version"):
+            return str(marker["version"])
+        return read_app_version()
+
+    def _read_update_version_marker(self) -> dict[str, str]:
+        if not UPDATE_VERSION_PATH.exists():
+            return {}
+        try:
+            data = json.loads(UPDATE_VERSION_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_update_version_marker(self, source: str, archive_name: str, commit: str, version: str) -> None:
+        data = {
+            "source": source,
+            "archive": archive_name,
+            "version": version,
+            "commit": commit,
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        UPDATE_VERSION_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def _backup_git_update_state(self) -> str:
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        if status.returncode != 0 or not status.stdout.strip():
+            return ""
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        backup_dir = PROJECT_ROOT / ".local-update-backups" / f"runtime-update-{stamp}"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        (backup_dir / "git-status.txt").write_text(status.stdout, encoding="utf-8")
+        for name, args in {
+            "git-diff.patch": ["git", "diff", "--binary"],
+            "git-diff-staged.patch": ["git", "diff", "--cached", "--binary"],
+        }.items():
+            result = subprocess.run(
+                args,
+                cwd=str(PROJECT_ROOT),
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and result.stdout:
+                (backup_dir / name).write_text(result.stdout, encoding="utf-8")
+        return str(backup_dir.relative_to(PROJECT_ROOT))
 
     def _resolve_update_archive(self, source: str, tmp_path: Path) -> tuple[Path, str]:
         github_repo = self._github_repo_from_source(source)
@@ -2982,6 +3762,38 @@ class OperatorUi(ctk.CTk):
             raise RuntimeError(f"GitHub update failed. Detail: {detail}")
         return archive_path, f"github:{owner}/{name}@{branch}"
 
+    def _latest_github_commit(self, repo: tuple[str, str, str]) -> str:
+        owner, name, branch = repo
+        api_url = f"https://api.github.com/repos/{owner}/{name}/commits/{branch}"
+        try:
+            request = Request(api_url, headers={"User-Agent": "BaseClaw-Update-Checker"})
+            with urlopen(request, timeout=12) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            sha = str(data.get("sha") or "")
+            if sha:
+                return sha
+        except Exception:
+            pass
+        result = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{owner}/{name}.git", f"refs/heads/{branch}"],
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError("Could not check GitHub for updates.")
+        return result.stdout.split()[0]
+
+    def _latest_github_version(self, repo: tuple[str, str, str]) -> str:
+        owner, name, branch = repo
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{name}/{branch}/VERSION"
+        try:
+            request = Request(raw_url, headers={"User-Agent": "BaseClaw-Update-Checker"})
+            with urlopen(request, timeout=12) as response:
+                return response.read().decode("utf-8", errors="replace").strip().splitlines()[0].strip()
+        except Exception:
+            return ""
+
     def _looks_like_ssh_source(self, source: str) -> bool:
         return ":" in source and not source.startswith("/") and not source.startswith(("http://", "https://"))
 
@@ -3016,10 +3828,14 @@ class OperatorUi(ctk.CTk):
         excluded = {
             ".env.telegram-operator",
             ".git",
+            ".local-update-backups",
             ".venv-kokoro",
             ".venv-telegram-agent",
+            ".baseclaw-install.conf",
+            ".baseclaw-version.json",
             "agent_workspace",
             "profiles",
+            "telegram_uploads",
             "telegram_codex_operator.log",
             "telegram_operator_messages.sqlite3",
             "telegram_operator_memory.jsonl",

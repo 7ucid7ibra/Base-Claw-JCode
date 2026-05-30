@@ -1,11 +1,11 @@
-# Custom Voices
+# Custom Voice Assets
 
 Place compatible Kokoro community voice files here.
 
 Example:
 
 ```text
-custom_voices/am_dylan.pt
+voice_assets/custom/am_dylan.pt
 ```
 
 If a file is named `am_dylan.pt`, call `/synthesize` with:

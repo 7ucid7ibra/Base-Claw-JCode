@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
 import platform
 import queue
 import re
-import shlex
 import secrets
 import shutil
 import sqlite3
@@ -19,7 +17,6 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +57,7 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 LOGGER = logging.getLogger("telegram_codex_operator")
+BOT_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 SPEECH_CONNECT_TIMEOUT_SECONDS = 4
 SPEECH_READ_TIMEOUT_SECONDS = 300
 SPEECH_REQUEST_TIMEOUT = (SPEECH_CONNECT_TIMEOUT_SECONDS, SPEECH_READ_TIMEOUT_SECONDS)
@@ -67,11 +65,97 @@ CODEX_FINAL_MESSAGE_GRACE_SECONDS = 8.0
 STATUS_UPDATE_INITIAL_DELAY_SECONDS = 120
 STATUS_UPDATE_INTERVAL_SECONDS = 120
 STATUS_CHANGE_MIN_INTERVAL_SECONDS = 12
+VOICE_CAPTION_MAX_CHARS = 999
+SPOKEN_TEXT_MAX_CHARS = 2400
 PDF_EXTRACT_MAX_CHARS = 60000
+TEXT_DOCUMENT_MAX_CHARS = 60000
 PHOTO_ALBUM_SETTLE_SECONDS = 1.5
+SLASH_COMMAND_EXTENSIONS = (".md", ".txt", ".prompt")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 VIDEO_MIME_PREFIX = "video/"
+TEXT_DOCUMENT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".markdown",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".log",
+    ".xml",
+    ".html",
+    ".css",
+    ".js",
+    ".ts",
+    ".py",
+    ".sh",
+}
+TEXT_DOCUMENT_MIME_TYPES = {
+    "application/json",
+    "application/x-ndjson",
+    "application/xml",
+    "text/csv",
+    "text/html",
+    "text/markdown",
+    "text/plain",
+    "text/tab-separated-values",
+    "text/xml",
+}
 DEFAULT_MANUAL_UPDATE_REF = "main"
+
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]{1,120})\]\((https?://[^)\s]+)\)")
+URL_RE = re.compile(r"https?://[^\s<>)\]]+")
+WINDOWS_PATH_RE = re.compile(r"(?<!\w)[A-Za-z]:\\[^\s<>\"]+")
+UNIX_PATH_RE = re.compile(
+    r"(?<!\w)(?:~|/(?:Users|home|var|tmp|mnt|media|opt|usr|etc|Applications))"
+    r"(?:/[^\s<>\":;,|]+)+"
+)
+FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _spoken_url_label(url: str) -> str:
+    try:
+        host = urlsplit(url).netloc.lower()
+    except Exception:
+        return "the link"
+    if host.startswith("www."):
+        host = host[4:]
+    return host or "the link"
+
+
+def _spoken_path_label(path_text: str) -> str:
+    cleaned = path_text.rstrip(".,;:)")
+    normalized = cleaned.replace("\\", "/").rstrip("/")
+    name = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
+    if not name or name in {"~", "."}:
+        return "a local path"
+    if "." in name and len(name) <= 48:
+        return f"the {name} file"
+    if len(name) <= 36:
+        return f"the {name} path"
+    return "a local path"
+
+
+def spoken_reply_text(text: str) -> str:
+    """Return a Kokoro-friendly copy while leaving the written reply unchanged."""
+    spoken = FENCED_CODE_RE.sub(" Code block omitted. ", text)
+    spoken = MARKDOWN_LINK_RE.sub(lambda match: f"{match.group(1)} at {_spoken_url_label(match.group(2))}", spoken)
+    spoken = URL_RE.sub(lambda match: _spoken_url_label(match.group(0)), spoken)
+    spoken = WINDOWS_PATH_RE.sub(lambda match: _spoken_path_label(match.group(0)), spoken)
+    spoken = UNIX_PATH_RE.sub(lambda match: _spoken_path_label(match.group(0)), spoken)
+    spoken = re.sub(
+        r"`([^`]{1,160})`",
+        lambda match: _spoken_path_label(match.group(1))
+        if "/" in match.group(1) or "\\" in match.group(1)
+        else match.group(1),
+        spoken,
+    )
+    spoken = re.sub(r"\s+", " ", spoken).strip()
+    if len(spoken) > SPOKEN_TEXT_MAX_CHARS:
+        spoken = spoken[:SPOKEN_TEXT_MAX_CHARS].rsplit(" ", 1)[0].rstrip() + "."
+    return spoken
 
 
 def utc_now() -> str:
@@ -83,6 +167,21 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def normalize_bot_token(value: str) -> str:
+    token = re.sub(r"\s+", "", value.strip())
+    half = len(token) // 2
+    if len(token) % 2 == 0 and half and token[:half] == token[half:] and BOT_TOKEN_RE.fullmatch(token[:half]):
+        return token[:half]
+    return token
+
+
+def require_bot_token() -> str:
+    token = normalize_bot_token(require_env("TELEGRAM_BOT_TOKEN"))
+    if not BOT_TOKEN_RE.fullmatch(token):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN looks invalid. Paste exactly one token from BotFather; do not paste it twice.")
+    return token
 
 
 def parse_allowed_chat_ids(raw: str) -> set[int]:
@@ -114,6 +213,13 @@ def is_video_file(filename: str, mime_type: str) -> bool:
     if (mime_type or "").lower().startswith(VIDEO_MIME_PREFIX):
         return True
     return Path(filename or "").suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_text_document(filename: str, mime_type: str) -> bool:
+    lowered_mime = (mime_type or "").lower()
+    if lowered_mime.startswith("text/") or lowered_mime in TEXT_DOCUMENT_MIME_TYPES:
+        return True
+    return Path(filename or "").suffix.lower() in TEXT_DOCUMENT_EXTENSIONS
 
 
 def parse_bool(raw: str, default: bool) -> bool:
@@ -391,21 +497,6 @@ class OperatorConfig:
     supervisor_id: str
     supervisor_name: str
     supervisor_role: str
-    history_agent_name: str
-    history_device_name: str
-    history_remote: str
-    history_remote_db_path: str
-    history_ssh_key_path: Path
-    history_known_hosts_path: Path
-    history_sync_limit: int
-    history_auto_sync_enabled: bool
-    history_auto_sync_interval_seconds: int
-    board_poll_enabled: bool
-    board_poll_interval_seconds: int
-    board_remote: str
-    board_path: str
-    board_state_path: Path
-    board_agent_aliases: list[str]
     source_update_remote: str
     manual_update_ref: str
     supervisor_device_label: str
@@ -469,20 +560,6 @@ class PendingApproval:
     text: str
     transcript: Optional[str]
     proposal: str
-    created_at: str
-
-
-@dataclass
-class PendingSourceUpdate:
-    chat_id: int
-    entry: dict[str, Any]
-    created_at: str
-
-
-@dataclass
-class PendingBoardEntry:
-    chat_id: int
-    entry: dict[str, Any]
     created_at: str
 
 
@@ -580,37 +657,6 @@ class SQLiteMessageStore:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_telegram_messages_event ON telegram_messages(event_type)"
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS history_sync_state (
-                    local_message_id INTEGER PRIMARY KEY,
-                    sync_source TEXT,
-                    synced_at TEXT,
-                    sync_error TEXT,
-                    FOREIGN KEY(local_message_id) REFERENCES telegram_messages(id) ON DELETE CASCADE
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_history_sync_synced_at ON history_sync_state(synced_at)"
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS board_action_cards (
-                    card_id TEXT NOT NULL,
-                    card_type TEXT NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    entry_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    choice TEXT,
-                    PRIMARY KEY (card_id, card_type)
-                )
-                """
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_board_action_cards_chat ON board_action_cards(chat_id, card_type)"
             )
             connection.execute(
                 """
@@ -819,6 +865,89 @@ class SQLiteMessageStore:
             return ""
 
     @staticmethod
+    def _recall_terms(text: str, *, limit: int = 8) -> list[str]:
+        stop_words = {
+            "about",
+            "after",
+            "again",
+            "because",
+            "before",
+            "could",
+            "from",
+            "have",
+            "here",
+            "latest",
+            "like",
+            "more",
+            "should",
+            "that",
+            "their",
+            "there",
+            "this",
+            "through",
+            "what",
+            "when",
+            "where",
+            "which",
+            "with",
+            "would",
+            "your",
+        }
+        terms: list[str] = []
+        for term in re.findall(r"[A-Za-z0-9_@.-]{4,}", text.lower()):
+            normalized = term.strip("._-")
+            if not normalized or normalized in stop_words:
+                continue
+            if normalized not in terms:
+                terms.append(normalized)
+            if len(terms) >= limit:
+                break
+        return terms
+
+    def recalled_context_rows(self, *, chat_id: int, current_text: str, limit: int = 6) -> list[dict[str, str]]:
+        terms = self._recall_terms(current_text)
+        if not terms:
+            return []
+        limit = max(1, min(12, limit))
+        where_clauses = []
+        params: list[Any] = [chat_id]
+        for term in terms:
+            where_clauses.append("LOWER(COALESCE(text, '') || ' ' || COALESCE(transcript, '')) LIKE ?")
+            params.append(f"%{term}%")
+        params.append(limit)
+        try:
+            with self._connect() as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    f"""
+                    SELECT id, direction, event_type, text, transcript, recorded_at
+                    FROM telegram_messages
+                    WHERE
+                        direction IN ('in', 'out')
+                        AND (chat_id = ? OR chat_id IS NULL)
+                        AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
+                        AND ({" OR ".join(where_clauses)})
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    params,
+                ).fetchall()
+        except (OSError, sqlite3.Error):
+            LOGGER.exception("Failed to recall context rows chat_id=%s", chat_id)
+            return []
+
+        payload = []
+        current_norm = " ".join(current_text.strip().split())
+        for row in reversed(rows):
+            event_type = row["event_type"] or ""
+            role = "user" if row["direction"] == "in" or event_type.startswith("desktop_user") else "assistant"
+            text = (row["transcript"] or row["text"] or "").strip()
+            if not text or " ".join(text.split()) == current_norm:
+                continue
+            payload.append({"role": role, "text": text, "recorded_at": str(row["recorded_at"] or "")})
+        return payload
+
+    @staticmethod
     def _compact_memory_line(text: str, limit: int = 220) -> str:
         text = " ".join(text.strip().split())
         if len(text) <= limit:
@@ -910,211 +1039,6 @@ class SQLiteMessageStore:
         except json.JSONDecodeError:
             LOGGER.exception("Stored supervisor identity is invalid JSON key=%s", identity_key)
             return None
-
-    def _eligible_history_where(self) -> str:
-        return """
-            direction IN ('in', 'out')
-            AND COALESCE(NULLIF(text, ''), NULLIF(transcript, '')) IS NOT NULL
-        """
-
-    def history_sync_status(self) -> dict[str, Any]:
-        with self._connect() as connection:
-            total = connection.execute(
-                f"SELECT COUNT(*) FROM telegram_messages WHERE {self._eligible_history_where()}"
-            ).fetchone()[0]
-            synced = connection.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM telegram_messages m
-                JOIN history_sync_state s ON s.local_message_id = m.id
-                WHERE {self._eligible_history_where()} AND s.synced_at IS NOT NULL
-                """
-            ).fetchone()[0]
-            unsynced = connection.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM telegram_messages m
-                LEFT JOIN history_sync_state s ON s.local_message_id = m.id
-                WHERE {self._eligible_history_where()} AND s.synced_at IS NULL
-                """
-            ).fetchone()[0]
-            last_synced = connection.execute(
-                "SELECT MAX(synced_at) FROM history_sync_state WHERE synced_at IS NOT NULL"
-            ).fetchone()[0]
-            last_error = connection.execute(
-                """
-                SELECT sync_error
-                FROM history_sync_state
-                WHERE sync_error IS NOT NULL AND sync_error != ''
-                ORDER BY rowid DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        return {
-            "total": int(total),
-            "synced": int(synced),
-            "unsynced": int(unsynced),
-            "last_synced": last_synced,
-            "last_error": last_error[0] if last_error else None,
-        }
-
-    def unsynced_history_rows(self, *, agent: str, device: str, limit: int = 250) -> list[dict[str, Any]]:
-        with self._connect() as connection:
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
-                f"""
-                SELECT
-                    m.id,
-                    m.recorded_at,
-                    m.direction,
-                    m.event_type,
-                    m.chat_id,
-                    m.telegram_message_id,
-                    m.telegram_user_id,
-                    m.telegram_username,
-                    m.telegram_full_name,
-                    m.message_type,
-                    m.text,
-                    m.transcript,
-                    m.session_id,
-                    m.safe_mode,
-                    m.approval_id,
-                    m.metadata_json
-                FROM telegram_messages m
-                LEFT JOIN history_sync_state s ON s.local_message_id = m.id
-                WHERE {self._eligible_history_where()} AND s.synced_at IS NULL
-                ORDER BY m.id ASC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        payloads = []
-        for row in rows:
-            role = "user" if row["direction"] == "in" else "assistant"
-            message_text = row["text"] or row["transcript"] or ""
-            metadata = {
-                "local_message_id": row["id"],
-                "event_type": row["event_type"],
-                "direction": row["direction"],
-                "telegram_message_id": row["telegram_message_id"],
-                "telegram_username": row["telegram_username"],
-                "telegram_full_name": row["telegram_full_name"],
-                "safe_mode": row["safe_mode"],
-                "approval_id": row["approval_id"],
-            }
-            if row["metadata_json"]:
-                try:
-                    metadata["local_metadata"] = json.loads(row["metadata_json"])
-                except json.JSONDecodeError:
-                    metadata["local_metadata_raw"] = row["metadata_json"]
-            payloads.append(
-                {
-                    "local_id": row["id"],
-                    "agent": agent,
-                    "device": device,
-                    "conversation_id": row["session_id"] or (str(row["chat_id"]) if row["chat_id"] is not None else None),
-                    "role": role,
-                    "channel": "telegram",
-                    "sender_id": str(row["telegram_user_id"] or row["chat_id"] or ""),
-                    "transport": row["message_type"] or row["event_type"],
-                    "source": f"{agent}:{device}:{row['id']}",
-                    "message_text": message_text,
-                    "transcript_text": row["transcript"],
-                    "raw_payload_json": row["metadata_json"],
-                    "metadata_json": json.dumps(metadata, ensure_ascii=True, default=str),
-                    "message_ts": row["recorded_at"],
-                    "recorded_at": row["recorded_at"],
-                    "synced_at": utc_now(),
-                    "sync_source": "telegram_operator_history_sync",
-                }
-            )
-        return payloads
-
-    def mark_history_synced(self, local_ids: list[int], *, sync_source: str) -> None:
-        if not local_ids:
-            return
-        synced_at = utc_now()
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO history_sync_state (local_message_id, sync_source, synced_at, sync_error)
-                VALUES (?, ?, ?, NULL)
-                ON CONFLICT(local_message_id) DO UPDATE SET
-                    sync_source=excluded.sync_source,
-                    synced_at=excluded.synced_at,
-                    sync_error=NULL
-                """,
-                [(local_id, sync_source, synced_at) for local_id in local_ids],
-            )
-
-    def mark_history_sync_error(self, local_ids: list[int], error: str) -> None:
-        if not local_ids:
-            return
-        with self._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO history_sync_state (local_message_id, sync_source, synced_at, sync_error)
-                VALUES (?, NULL, NULL, ?)
-                ON CONFLICT(local_message_id) DO UPDATE SET
-                    sync_error=excluded.sync_error
-                """,
-                [(local_id, error[:1000]) for local_id in local_ids],
-            )
-
-    def save_board_action_card(self, *, card_id: str, card_type: str, chat_id: int, entry: dict[str, Any]) -> None:
-        now = utc_now()
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO board_action_cards (card_id, card_type, chat_id, entry_json, created_at, updated_at, choice)
-                VALUES (?, ?, ?, ?, ?, ?, NULL)
-                ON CONFLICT(card_id, card_type) DO UPDATE SET
-                    chat_id=excluded.chat_id,
-                    entry_json=excluded.entry_json,
-                    updated_at=excluded.updated_at
-                """,
-                (card_id, card_type, chat_id, json.dumps(entry, ensure_ascii=True, default=str), now, now),
-            )
-
-    def load_board_action_card(self, *, card_id: str, card_type: str) -> Optional[dict[str, Any]]:
-        with self._connect() as connection:
-            connection.row_factory = sqlite3.Row
-            row = connection.execute(
-                """
-                SELECT card_id, card_type, chat_id, entry_json, created_at, updated_at, choice
-                FROM board_action_cards
-                WHERE card_id = ? AND card_type = ?
-                """,
-                (card_id, card_type),
-            ).fetchone()
-        if not row:
-            return None
-        try:
-            entry = json.loads(row["entry_json"])
-        except json.JSONDecodeError:
-            LOGGER.exception("Stored board action card is invalid card_id=%s card_type=%s", card_id, card_type)
-            return None
-        return {
-            "card_id": row["card_id"],
-            "card_type": row["card_type"],
-            "chat_id": int(row["chat_id"]),
-            "entry": entry,
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-            "choice": row["choice"],
-        }
-
-    def mark_board_action_card(self, *, card_id: str, card_type: str, choice: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                UPDATE board_action_cards
-                SET choice = ?, updated_at = ?
-                WHERE card_id = ? AND card_type = ?
-                """,
-                (choice, utc_now(), card_id, card_type),
-            )
-
 
 class RemoteFirstWhisperTranscriber:
     def __init__(self, server_urls: list[str], model_name: str):
@@ -1880,12 +1804,8 @@ class TelegramCodexOperator:
         self.voice = KokoroVoiceReply(config.kokoro_urls, config.kokoro_voice, config.kokoro_lang_code)
         self.chat_locks: Dict[int, asyncio.Lock] = {}
         self.pending_approvals: Dict[str, PendingApproval] = {}
-        self.pending_source_updates: Dict[str, PendingSourceUpdate] = {}
-        self.pending_board_entries: Dict[str, PendingBoardEntry] = {}
         self.pending_manual_updates: Dict[int, str] = {}
         self.photo_albums: Dict[tuple[int, str], dict[str, Any]] = {}
-        self.board_poll_loop_active = False
-        self.board_poll_loop_inactive_reason = "not started"
 
     def _local_memory_gb(self) -> Optional[float]:
         if platform.system().lower() != "windows":
@@ -1959,13 +1879,6 @@ class TelegramCodexOperator:
                 "source_commit": self._current_source_commit(),
                 "safety_mode": self.config.safety_mode,
             },
-            "coordination": {
-                "history_agent_name": self.config.history_agent_name,
-                "history_device_name": self.config.history_device_name,
-                "board_remote": self.config.board_remote,
-                "board_path": self.config.board_path,
-                "board_aliases": self.config.board_agent_aliases,
-            },
         }
 
     def _load_or_initialize_identity(self) -> dict[str, Any]:
@@ -1976,7 +1889,6 @@ class TelegramCodexOperator:
     def _identity_prompt_block(self) -> str:
         machine = self.identity.get("machine", {})
         operator = self.identity.get("operator", {})
-        coordination = self.identity.get("coordination", {})
         return "\n".join(
             [
                 f"Supervisor identity: {self.identity.get('display_name')} ({self.identity.get('supervisor_id')})",
@@ -1985,7 +1897,6 @@ class TelegramCodexOperator:
                 f"Machine: {machine.get('hostname')} / {machine.get('device_label')} / {machine.get('os')}",
                 f"Specs: CPU count {machine.get('cpu_count')}, RAM {machine.get('ram_gb')} GB",
                 f"Source commit: {operator.get('source_commit')}",
-                f"Board aliases: {', '.join(coordination.get('board_aliases') or [])}",
                 "Identity rule: use this database identity for self-reference; do not infer identity from stale chat memory.",
             ]
         )
@@ -2427,353 +2338,6 @@ class TelegramCodexOperator:
             LOGGER.info("Code mode committed agent changes commit=%s", commit)
         return commit
 
-    def _history_sync_available(self) -> tuple[bool, str]:
-        missing = []
-        if not self.config.history_remote:
-            missing.append("TELEGRAM_OPERATOR_HISTORY_REMOTE")
-        if not self.config.history_remote_db_path:
-            missing.append("TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH")
-        if not self.config.history_ssh_key_path.exists():
-            missing.append(f"SSH key missing: {self.config.history_ssh_key_path}")
-        if not self.config.history_known_hosts_path.exists():
-            missing.append(f"known_hosts missing: {self.config.history_known_hosts_path}")
-        if missing:
-            return False, "; ".join(missing)
-        return True, "configured"
-
-    def _history_ssh_base_command(self) -> list[str]:
-        return [
-            "ssh",
-            "-i",
-            str(self.config.history_ssh_key_path),
-            "-o",
-            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ConnectTimeout=10",
-            self.config.history_remote,
-        ]
-
-    def _history_scp_base_command(self) -> list[str]:
-        return [
-            "scp",
-            "-i",
-            str(self.config.history_ssh_key_path),
-            "-o",
-            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
-            "-o",
-            "StrictHostKeyChecking=yes",
-        ]
-
-    def _board_available(self) -> tuple[bool, str]:
-        missing = []
-        if not self.config.board_poll_enabled:
-            missing.append("board polling disabled")
-        if not self.config.board_remote:
-            missing.append("TELEGRAM_OPERATOR_BOARD_REMOTE or TELEGRAM_OPERATOR_HISTORY_REMOTE")
-        if not self.config.board_path:
-            missing.append("TELEGRAM_OPERATOR_BOARD_PATH")
-        if not self.config.history_ssh_key_path.exists():
-            missing.append(f"SSH key missing: {self.config.history_ssh_key_path}")
-        if not self.config.history_known_hosts_path.exists():
-            missing.append(f"known_hosts missing: {self.config.history_known_hosts_path}")
-        if missing:
-            return False, "; ".join(missing)
-        return True, "configured"
-
-    def _board_ssh_base_command(self) -> list[str]:
-        return [
-            "ssh",
-            "-i",
-            str(self.config.history_ssh_key_path),
-            "-o",
-            f"UserKnownHostsFile={self.config.history_known_hosts_path}",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ConnectTimeout=10",
-            self.config.board_remote,
-        ]
-
-    def _load_board_state(self) -> dict[str, Any]:
-        if not self.config.board_state_path.exists():
-            return {"initialized": False, "seen": []}
-        try:
-            data = json.loads(self.config.board_state_path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError):
-            return {"initialized": False, "seen": []}
-        data.setdefault("initialized", False)
-        data.setdefault("seen", [])
-        return data
-
-    def _save_board_state(self, state: dict[str, Any]) -> None:
-        self.config.board_state_path.parent.mkdir(parents=True, exist_ok=True)
-        state["seen"] = list(dict.fromkeys(state.get("seen", [])))[-500:]
-        self.config.board_state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    def _board_entry_id(self, raw_line: str) -> str:
-        return hashlib.sha256(raw_line.encode("utf-8", errors="replace")).hexdigest()
-
-    def _board_callback_id(self, entry: dict[str, Any]) -> str:
-        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
-
-    def _fetch_board_entries(self) -> list[dict[str, Any]]:
-        available, detail = self._board_available()
-        if not available:
-            raise RuntimeError(detail)
-        remote_command = f"tail -n 80 {shlex.quote(self.config.board_path)}"
-        result = subprocess.run(
-            [*self._board_ssh_base_command(), remote_command],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **hidden_subprocess_kwargs(),
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or result.stdout).strip() or "board fetch failed")
-        entries = []
-        for raw_line in result.stdout.splitlines():
-            line = raw_line.strip().lstrip("\ufeff")
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            entry["_entry_id"] = self._board_entry_id(line)
-            entries.append(entry)
-        return entries
-
-    def _board_entry_relevant(self, entry: dict[str, Any]) -> bool:
-        sender = str(entry.get("agent") or "").strip()
-        if sender in set(self.config.board_agent_aliases):
-            return False
-        if str(entry.get("type") or "").strip() == "source_baseline_update":
-            return True
-        if str(entry.get("type") or "").strip() in {"result", "source_update_result"}:
-            return False
-        target = entry.get("to")
-        if target is None:
-            return False
-        targets = target if isinstance(target, list) else [target]
-        aliases = {alias.lower() for alias in self.config.board_agent_aliases}
-        aliases.add("all")
-        return any(str(item).strip().lower() in aliases for item in targets)
-
-    def _format_board_notice(self, entry: dict[str, Any]) -> str:
-        body = entry.get("body")
-        if isinstance(body, dict):
-            body_text = json.dumps(body, ensure_ascii=False)
-        else:
-            body_text = str(body or "").strip()
-        if len(body_text) > 1200:
-            body_text = body_text[:1197].rstrip() + "..."
-        return (
-            "New shared board entry noticed.\n"
-            f"From: {entry.get('agent', 'unknown')}\n"
-            f"Type: {entry.get('type', 'unknown')}\n"
-            f"Thread: {entry.get('thread_id', 'none')}\n"
-            f"Task: {entry.get('task_id', 'none')}\n"
-            f"Status: {entry.get('status', 'none')}\n\n"
-            f"{body_text}\n\n"
-            "Use the buttons below so the action stays tied to this exact board entry."
-        )
-
-    def _format_board_entry_details(self, entry: dict[str, Any]) -> str:
-        details = json.dumps(
-            {key: value for key, value in entry.items() if key != "_entry_id"},
-            ensure_ascii=False,
-            indent=2,
-        )
-        if len(details) > 3000:
-            details = details[:2997].rstrip() + "..."
-        return f"Board entry details:\n{details}"
-
-    def _mark_board_entry_choice(self, board_entry_id: str, choice: str) -> None:
-        state = self._load_board_state()
-        choices = state.setdefault("board_entry_choices", {})
-        choices[board_entry_id] = {"choice": choice, "time": utc_now()}
-        self._save_board_state(state)
-        self.message_store.mark_board_action_card(card_id=board_entry_id, card_type="board", choice=choice)
-
-    def _load_pending_board_entry(self, board_entry_id: str) -> Optional[PendingBoardEntry]:
-        pending = self.pending_board_entries.get(board_entry_id)
-        if pending is not None:
-            return pending
-        card = self.message_store.load_board_action_card(card_id=board_entry_id, card_type="board")
-        if not card:
-            return None
-        pending = PendingBoardEntry(
-            chat_id=int(card["chat_id"]),
-            entry=card["entry"],
-            created_at=str(card.get("created_at") or utc_now()),
-        )
-        self.pending_board_entries[board_entry_id] = pending
-        return pending
-
-    async def _send_board_entry_card(
-        self,
-        application: Application,
-        chat_id: int,
-        entry: dict[str, Any],
-    ) -> None:
-        board_entry_id = self._board_callback_id(entry)
-        self.pending_board_entries[board_entry_id] = PendingBoardEntry(
-            chat_id=chat_id,
-            entry=entry,
-            created_at=utc_now(),
-        )
-        self.message_store.save_board_action_card(
-            card_id=board_entry_id,
-            card_type="board",
-            chat_id=chat_id,
-            entry=entry,
-        )
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Proceed", callback_data=f"board:proceed:{board_entry_id}"),
-                    InlineKeyboardButton("Later", callback_data=f"board:later:{board_entry_id}"),
-                ],
-                [
-                    InlineKeyboardButton("Details", callback_data=f"board:details:{board_entry_id}"),
-                    InlineKeyboardButton("Dismiss", callback_data=f"board:dismiss:{board_entry_id}"),
-                ],
-            ]
-        )
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=self._format_board_notice(entry)[:3900],
-            reply_markup=keyboard,
-        )
-
-    def _build_board_entry_prompt(self, entry: dict[str, Any]) -> str:
-        body = entry.get("body")
-        body_text = json.dumps(body, ensure_ascii=False, indent=2) if isinstance(body, dict) else str(body or "")
-        meta = entry.get("meta")
-        meta_text = json.dumps(meta, ensure_ascii=False, indent=2) if isinstance(meta, dict) else str(meta or "")
-        return "\n\n".join(
-            [
-                "Handle the following shared board entry.",
-                "The user clicked the inline Proceed button for this exact entry.",
-                "Do not treat unrelated recent chat context as approval for a different board item.",
-                "If this is a source update candidate, review it according to SOURCE_CONTRIBUTION_REVIEW.md and report a result. Do not silently promote it to baseline.",
-                "If this is an implementation task, keep the work bounded to the board entry and report blockers clearly.",
-                f"From: {entry.get('agent', 'unknown')}",
-                f"Type: {entry.get('type', 'unknown')}",
-                f"To: {entry.get('to', 'unknown')}",
-                f"Thread: {entry.get('thread_id', 'none')}",
-                f"Task: {entry.get('task_id', 'none')}",
-                f"Status: {entry.get('status', 'none')}",
-                "Body:",
-                body_text,
-                "Meta:",
-                meta_text,
-            ]
-        )
-
-    def _source_update_payload(self, entry: dict[str, Any]) -> dict[str, Any]:
-        body = entry.get("body")
-        if isinstance(body, dict):
-            return body
-        return {"purpose": str(body or "").strip()}
-
-    def _source_update_id(self, entry: dict[str, Any]) -> str:
-        return (entry.get("_entry_id") or self._board_entry_id(json.dumps(entry, sort_keys=True)))[:12]
-
-    def _format_source_update_card(self, entry: dict[str, Any]) -> str:
-        body = self._source_update_payload(entry)
-        purpose = str(body.get("purpose") or "").strip() or "No purpose provided."
-        if len(purpose) > 900:
-            purpose = purpose[:897].rstrip() + "..."
-        lines = [
-            "Source update available.",
-            f"Repo: {body.get('repo_id') or 'unknown'}",
-            f"Branch: {body.get('branch') or 'unknown'}",
-            f"Commit: {body.get('commit') or 'unknown'}",
-            f"Action: {body.get('action_for_supervisors') or 'unspecified'}",
-            "",
-            purpose,
-            "",
-            "Choose Update now only if you want this supervisor to adopt the accepted baseline.",
-        ]
-        return "\n".join(lines)
-
-    def _format_source_update_details(self, entry: dict[str, Any]) -> str:
-        body = self._source_update_payload(entry)
-        details = json.dumps(body, ensure_ascii=False, indent=2)
-        if len(details) > 3000:
-            details = details[:2997].rstrip() + "..."
-        return f"Source update details:\n{details}"
-
-    def _mark_source_update_choice(self, source_update_id: str, choice: str) -> None:
-        state = self._load_board_state()
-        choices = state.setdefault("source_update_choices", {})
-        choices[source_update_id] = {"choice": choice, "time": utc_now()}
-        self._save_board_state(state)
-        self.message_store.mark_board_action_card(card_id=source_update_id, card_type="source", choice=choice)
-
-    def _load_pending_source_update(self, source_update_id: str) -> Optional[PendingSourceUpdate]:
-        pending = self.pending_source_updates.get(source_update_id)
-        if pending is not None:
-            return pending
-        card = self.message_store.load_board_action_card(card_id=source_update_id, card_type="source")
-        if not card:
-            return None
-        pending = PendingSourceUpdate(
-            chat_id=int(card["chat_id"]),
-            entry=card["entry"],
-            created_at=str(card.get("created_at") or utc_now()),
-        )
-        self.pending_source_updates[source_update_id] = pending
-        return pending
-
-    def _validate_source_update_for_pull(self, pending: PendingSourceUpdate) -> tuple[bool, str, dict[str, Any]]:
-        body = self._source_update_payload(pending.entry)
-        repo_id = str(body.get("repo_id") or "").strip()
-        branch = str(body.get("branch") or "").strip()
-        commit = str(body.get("commit") or "").strip()
-        contributor = str(body.get("contributor") or "").strip()
-        reviewer = str(body.get("reviewer") or "").strip()
-        if repo_id and repo_id != "agent-system":
-            return False, f"Unsupported repo: {repo_id}", body
-        if not branch:
-            return False, "Board entry has no branch.", body
-        if not commit:
-            return False, "Board entry has no commit.", body
-        if not contributor or not reviewer:
-            return False, "Board entry has no contributor/reviewer metadata.", body
-        if contributor == reviewer:
-            return False, "Contributor and reviewer are the same.", body
-        if self._git_dirty():
-            return False, "Local worktree is not clean.", body
-        return True, "ok", body
-
-    def _pull_source_update(self, pending: PendingSourceUpdate) -> str:
-        ok, reason, body = self._validate_source_update_for_pull(pending)
-        if not ok:
-            return f"Update blocked: {reason}"
-        branch = str(body.get("branch") or "main").strip()
-        commit = str(body.get("commit") or "").strip()
-        remote = self._select_source_update_remote()
-        if not remote:
-            return (
-                "Update blocked: no usable source update remote is configured. "
-                "Set TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE or add a source mirror remote."
-            )
-        fetch = self._git_command(["fetch", remote, branch])
-        if fetch.returncode != 0:
-            return "Update blocked: git fetch failed: " + (fetch.stderr or fetch.stdout).strip()
-        current = self._git_command(["rev-parse", "--short", "HEAD"])
-        if current.returncode == 0 and current.stdout.strip() == commit[: len(current.stdout.strip())]:
-            return f"Already current at {current.stdout.strip()}."
-        merge = self._git_command(["merge", "--ff-only", commit])
-        if merge.returncode != 0:
-            return "Update blocked: git fast-forward failed: " + (merge.stderr or merge.stdout).strip()
-        return f"Updated local source to {commit[:7]}. Restart the operator to run the new code."
-
     def _manual_update_ref(self, requested_ref: Optional[str] = None) -> str:
         ref = (requested_ref or "").strip() or self.config.manual_update_ref.strip() or DEFAULT_MANUAL_UPDATE_REF
         return ref
@@ -2827,309 +2391,53 @@ class TelegramCodexOperator:
         if "source-mirror" in names:
             return "source-mirror"
         if "origin" in names:
-            origin_url = self._git_command(["remote", "get-url", "origin"])
-            if origin_url.returncode == 0:
-                url = origin_url.stdout.strip()
-                if "agent-system.git" in url or self.config.board_remote.split("@")[-1].split(":")[0] in url:
-                    return "origin"
+            return "origin"
         return None
 
-    async def _send_source_update_card(
+    async def _send_voice_reply(
         self,
-        application: Application,
+        context: ContextTypes.DEFAULT_TYPE,
         chat_id: int,
-        entry: dict[str, Any],
+        text: str,
+        *,
+        caption: Optional[str] = None,
     ) -> None:
-        source_update_id = self._source_update_id(entry)
-        self.pending_source_updates[source_update_id] = PendingSourceUpdate(
-            chat_id=chat_id,
-            entry=entry,
-            created_at=utc_now(),
-        )
-        self.message_store.save_board_action_card(
-            card_id=source_update_id,
-            card_type="source",
-            chat_id=chat_id,
-            entry=entry,
-        )
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Update now", callback_data=f"source:update:{source_update_id}"),
-                    InlineKeyboardButton("Later", callback_data=f"source:later:{source_update_id}"),
-                ],
-                [
-                    InlineKeyboardButton("Decline", callback_data=f"source:decline:{source_update_id}"),
-                    InlineKeyboardButton("Details", callback_data=f"source:details:{source_update_id}"),
-                ],
-            ]
-        )
-        await application.bot.send_message(
-            chat_id=chat_id,
-            text=self._format_source_update_card(entry)[:3900],
-            reply_markup=keyboard,
-        )
-
-    async def board_poll_loop(self, application: Application) -> None:
-        available, detail = self._board_available()
-        if not available:
-            LOGGER.info("Board polling not active: %s", detail)
-            self.board_poll_loop_active = False
-            self.board_poll_loop_inactive_reason = detail
-            return
-        self.board_poll_loop_active = True
-        self.board_poll_loop_inactive_reason = ""
-        while True:
-            if not self.config.board_poll_enabled:
-                await asyncio.sleep(self.config.board_poll_interval_seconds)
-                continue
-            try:
-                entries = await asyncio.to_thread(self._fetch_board_entries)
-                state = await asyncio.to_thread(self._load_board_state)
-                seen = set(state.get("seen", []))
-                current_ids = [entry["_entry_id"] for entry in entries]
-                if not state.get("initialized"):
-                    state["initialized"] = True
-                    state["seen"] = current_ids
-                    await asyncio.to_thread(self._save_board_state, state)
-                    LOGGER.info("Board polling initialized seen=%s", len(current_ids))
-                else:
-                    new_relevant = [
-                        entry
-                        for entry in entries
-                        if entry["_entry_id"] not in seen and self._board_entry_relevant(entry)
-                    ]
-                    if new_relevant:
-                        new_relevant_ids = {entry["_entry_id"] for entry in new_relevant}
-                        delivered_ids: set[str] = set()
-                        for entry in new_relevant:
-                            delivered = False
-                            for chat_id in self.config.allowed_chat_ids:
-                                try:
-                                    if str(entry.get("type") or "").strip() == "source_baseline_update":
-                                        await self._send_source_update_card(application, chat_id, entry)
-                                    else:
-                                        await self._send_board_entry_card(application, chat_id, entry)
-                                    delivered = True
-                                except Exception:
-                                    LOGGER.exception("Failed to send board notice chat_id=%s", chat_id)
-                            if delivered:
-                                delivered_ids.add(entry["_entry_id"])
-                        safe_seen_ids = (set(current_ids) - new_relevant_ids).union(delivered_ids)
-                        state["seen"] = list(seen.union(safe_seen_ids))
-                        await asyncio.to_thread(self._save_board_state, state)
-                    elif current_ids:
-                        state["seen"] = list(seen.union(current_ids))
-                        await asyncio.to_thread(self._save_board_state, state)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                LOGGER.warning("Board polling failed: %s", exc)
-            await asyncio.sleep(self.config.board_poll_interval_seconds)
-
-    async def history_auto_sync_loop(self) -> None:
-        if not self.config.history_auto_sync_enabled:
-            LOGGER.info("History auto-sync not active: disabled")
-            return
-        while True:
-            try:
-                available, detail = self._history_sync_available()
-                if not available:
-                    LOGGER.warning("History auto-sync skipped: %s", detail)
-                else:
-                    result = await asyncio.to_thread(self._sync_history_to_pi)
-                    selected = int(result.get("selected", 0) or 0)
-                    inserted = int(result.get("inserted", 0) or 0)
-                    skipped = int(result.get("skipped", 0) or 0)
-                    if selected:
-                        LOGGER.info(
-                            "History auto-sync complete selected=%s inserted=%s skipped=%s",
-                            selected,
-                            inserted,
-                            skipped,
-                        )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                LOGGER.warning("History auto-sync failed; will retry later: %s", exc)
-            await asyncio.sleep(self.config.history_auto_sync_interval_seconds)
-
-    def _sync_history_to_pi(self) -> dict[str, Any]:
-        available, detail = self._history_sync_available()
-        if not available:
-            raise RuntimeError(detail)
-
-        rows = self.message_store.unsynced_history_rows(
-            agent=self.config.history_agent_name,
-            device=self.config.history_device_name,
-            limit=self.config.history_sync_limit,
-        )
-        if not rows:
-            return {"selected": 0, "inserted": 0, "skipped": 0, "remote_db": self.config.history_remote_db_path}
-
-        local_ids = [int(row["local_id"]) for row in rows]
-        transfer_id = uuid.uuid4().hex
-        remote_dir = f"/tmp/baseclaw-history-sync-{transfer_id}"
-        remote_rows = f"{remote_dir}/rows.ndjson"
-        remote_script = f"{remote_dir}/sync_history.py"
-
-        script = r'''
-import json
-import sqlite3
-import sys
-from pathlib import Path
-
-rows_path = Path(sys.argv[1])
-db_path = Path(sys.argv[2])
-db_path.parent.mkdir(parents=True, exist_ok=True)
-
-schema = """
-PRAGMA journal_mode = WAL;
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent TEXT NOT NULL,
-    device TEXT,
-    conversation_id TEXT,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
-    channel TEXT NOT NULL DEFAULT 'telegram',
-    sender_id TEXT,
-    transport TEXT,
-    source TEXT,
-    message_text TEXT NOT NULL,
-    transcript_text TEXT,
-    raw_payload_json TEXT,
-    metadata_json TEXT,
-    message_ts TEXT NOT NULL,
-    recorded_at TEXT NOT NULL,
-    synced_at TEXT NOT NULL,
-    sync_source TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages (agent);
-CREATE INDEX IF NOT EXISTS idx_messages_device ON messages (device);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id);
-CREATE INDEX IF NOT EXISTS idx_messages_message_ts ON messages (message_ts);
-CREATE INDEX IF NOT EXISTS idx_messages_role ON messages (role);
-CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_unique ON messages (source);
-"""
-
-with rows_path.open("r", encoding="utf-8") as handle:
-    rows = [json.loads(line) for line in handle if line.strip()]
-
-inserted = 0
-with sqlite3.connect(db_path) as connection:
-    connection.executescript(schema)
-    for row in rows:
-        before = connection.total_changes
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO messages (
-                agent, device, conversation_id, role, channel, sender_id, transport, source,
-                message_text, transcript_text, raw_payload_json, metadata_json,
-                message_ts, recorded_at, synced_at, sync_source
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row.get("agent"),
-                row.get("device"),
-                row.get("conversation_id"),
-                row.get("role"),
-                row.get("channel") or "telegram",
-                row.get("sender_id"),
-                row.get("transport"),
-                row.get("source"),
-                row.get("message_text") or "",
-                row.get("transcript_text"),
-                row.get("raw_payload_json"),
-                row.get("metadata_json"),
-                row.get("message_ts"),
-                row.get("recorded_at"),
-                row.get("synced_at"),
-                row.get("sync_source"),
-            ),
-        )
-        if connection.total_changes > before:
-            inserted += 1
-
-print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(rows) - inserted, "remote_db": str(db_path)}))
-'''
-
-        with tempfile.TemporaryDirectory(prefix="baseclaw-history-sync-") as tmp:
-            tmp_dir = Path(tmp)
-            rows_path = tmp_dir / "rows.ndjson"
-            script_path = tmp_dir / "sync_history.py"
-            with rows_path.open("w", encoding="utf-8") as handle:
-                for row in rows:
-                    handle.write(json.dumps(row, ensure_ascii=True, default=str) + "\n")
-            script_path.write_text(script, encoding="utf-8")
-
-            mkdir_result = subprocess.run(
-                [*self._history_ssh_base_command(), f"mkdir -p {remote_dir}"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **hidden_subprocess_kwargs(),
-            )
-            if mkdir_result.returncode != 0:
-                raise RuntimeError((mkdir_result.stderr or mkdir_result.stdout).strip() or "failed to create remote temp dir")
-
-            scp_result = subprocess.run(
-                [*self._history_scp_base_command(), str(rows_path), str(script_path), f"{self.config.history_remote}:{remote_dir}/"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **hidden_subprocess_kwargs(),
-            )
-            if scp_result.returncode != 0:
-                raise RuntimeError((scp_result.stderr or scp_result.stdout).strip() or "failed to copy history sync files")
-
-            remote_command = (
-                f"python3 {remote_script} {remote_rows} {self.config.history_remote_db_path}; "
-                f"status=$?; rm -rf {remote_dir}; exit $status"
-            )
-            sync_result = subprocess.run(
-                [*self._history_ssh_base_command(), remote_command],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                **hidden_subprocess_kwargs(),
-            )
-            if sync_result.returncode != 0:
-                raise RuntimeError((sync_result.stderr or sync_result.stdout).strip() or "remote history sync failed")
-
-        summary = json.loads((sync_result.stdout or "{}").strip().splitlines()[-1])
-        self.message_store.mark_history_synced(local_ids, sync_source="pi_shared_history")
-        return summary
-
-    async def _send_voice_reply(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         if not self.config.voice_replies_enabled:
             return
         with tempfile.TemporaryDirectory(prefix="telegram-codex-reply-") as tmp:
-            ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, Path(tmp))
-            caption = text if len(text) <= 900 else text[:897].rstrip() + "..."
-            try:
-                await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
-            except Exception as exc:
-                LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
-            with ogg_path.open("rb") as handle:
-                sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+            tmp_path = Path(tmp)
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                try:
+                    if attempt > 1:
+                        await asyncio.sleep(1.2 * (attempt - 1))
+                    ogg_path = await asyncio.to_thread(self.voice.synthesize_ogg, text, tmp_path)
+                    try:
+                        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.RECORD_VOICE)
+                    except Exception as exc:
+                        LOGGER.warning("Telegram chat action failed before voice upload chat_id=%s error=%s", chat_id, exc)
+                    with ogg_path.open("rb") as handle:
+                        sent = await context.bot.send_voice(chat_id=chat_id, voice=handle, caption=caption)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    LOGGER.warning("Voice reply attempt failed chat_id=%s attempt=%s error=%s", chat_id, attempt, exc)
+            else:
+                raise last_error or RuntimeError("voice reply failed")
             self.message_store.append(
                 direction="out",
                 event_type="outgoing_voice_reply",
                 chat_id=chat_id,
                 telegram_message_id=sent.message_id,
                 message_type="voice",
-                text=caption,
+                text=caption or "",
                 safe_mode=self.config.safe_mode,
                 metadata={
                     "source_text": text,
                     "caption": caption,
                     "voice_duration": getattr(sent.voice, "duration", None) if sent.voice else None,
                     "voice_file_id": getattr(sent.voice, "file_id", None) if sent.voice else None,
+                    "attempts": attempt,
                 },
             )
 
@@ -3141,11 +2449,30 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         *,
         always_send_text: bool = False,
     ) -> None:
+        text, file_paths = self._extract_file_send_directives(text)
+        if file_paths:
+            if text.strip():
+                await self._send_text_chunks(context, chat_id, text.strip())
+            for file_path in file_paths:
+                await self._send_output_document(context, chat_id, file_path)
+            return
+
         if not self.config.voice_replies_enabled:
             await self._send_text_chunks(context, chat_id, text)
             return
+        spoken_text = spoken_reply_text(text)
+        if not spoken_text:
+            await self._send_text_chunks(context, chat_id, text)
+            return
+        if len(text) > VOICE_CAPTION_MAX_CHARS:
+            await self._send_text_chunks(context, chat_id, text)
+            try:
+                await self._send_voice_reply(context, chat_id, spoken_text, caption=None)
+            except Exception:
+                LOGGER.exception("Voice reply failed after text delivery chat_id=%s", chat_id)
+            return
         try:
-            await self._send_voice_reply(context, chat_id, text)
+            await self._send_voice_reply(context, chat_id, spoken_text, caption=text)
         except Exception as exc:
             LOGGER.exception("Voice reply failed chat_id=%s", chat_id)
             voice_error = friendly_voice_error(exc)
@@ -3156,8 +2483,79 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             )
             await self._send_text_chunks(context, chat_id, fallback)
         else:
-            if always_send_text or len(text) > 900:
+            if always_send_text:
                 await self._send_text_chunks(context, chat_id, text)
+
+    def _extract_file_send_directives(self, text: str) -> tuple[str, list[Path]]:
+        file_paths: list[Path] = []
+        kept_lines: list[str] = []
+        pattern = re.compile(r"^\s*BASECLAW_SEND_(?:FILE|DOCUMENT):\s*(.+?)\s*$", re.IGNORECASE)
+        for line in text.splitlines():
+            match = pattern.match(line)
+            if match:
+                raw_path = match.group(1).strip().strip("\"'")
+                if raw_path:
+                    file_paths.append(Path(raw_path).expanduser())
+                continue
+            kept_lines.append(line)
+        return "\n".join(kept_lines).strip(), file_paths
+
+    def _allowed_output_roots(self) -> list[Path]:
+        roots = [self.config.workdir, *self.config.allowed_paths]
+        if self.config.access_scope in {"code", "full"}:
+            roots.append(PROJECT_ROOT)
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            try:
+                key = str(root.resolve())
+            except OSError:
+                continue
+            if key not in seen:
+                unique.append(root.resolve())
+                seen.add(key)
+        return unique
+
+    def _validate_output_document_path(self, path: Path) -> Path:
+        resolved = path.resolve()
+        if not resolved.is_file():
+            raise RuntimeError(f"Requested output file does not exist or is not a file: {path}")
+        roots = self._allowed_output_roots()
+        allowed = False
+        for root in roots:
+            try:
+                if os.path.commonpath([str(root), str(resolved)]) == str(root):
+                    allowed = True
+                    break
+            except ValueError:
+                continue
+        if not allowed:
+            raise RuntimeError("Requested output file is outside the current profile workspace and allowed paths.")
+        return resolved
+
+    async def _send_output_document(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: Path) -> None:
+        document_path = self._validate_output_document_path(path)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+        except Exception as exc:
+            LOGGER.warning("Telegram chat action failed before document upload chat_id=%s error=%s", chat_id, exc)
+        with document_path.open("rb") as handle:
+            sent = await context.bot.send_document(chat_id=chat_id, document=handle, filename=document_path.name)
+        self.message_store.append(
+            direction="out",
+            event_type="outgoing_document_reply",
+            chat_id=chat_id,
+            telegram_message_id=sent.message_id,
+            message_type="document",
+            text=str(document_path),
+            safe_mode=self.config.safe_mode,
+            metadata={
+                "path": str(document_path),
+                "filename": document_path.name,
+                "profile_env": str(OPERATOR_ENV_PATH),
+                "send_guardrail": "current_profile_bot_current_chat",
+            },
+        )
 
     async def _send_text_chunks(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
         chunk_size = 3500
@@ -3194,6 +2592,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             "Do not create approval loops for small next steps unless there is real risk, missing access, or destructive impact.",
             "Reply concisely but helpfully for Telegram chat, and assume your text reply will also be spoken aloud with Kokoro.",
             "Voice-friendly reply rule: prefer plain conversational text. Avoid decorative Markdown such as bold/italic markers unless necessary. Do not quote long file paths, long numbers, long commands, logs, or code blocks in normal spoken replies; summarize them and include only short labels or essential names. If exact paths, commands, or code are needed, put them after a short spoken summary and keep them minimal.",
+            "Telegram send guardrail: never call Telegram Bot API methods, curl, requests, bot tokens, or external Telegram scripts yourself to send messages or files. Do not read or use TELEGRAM_BOT_TOKEN values for sending. To send a file to the user, create it under the current profile workspace or an allowed path and include a final line exactly like `BASECLAW_SEND_FILE: /absolute/path/to/file`. The bridge will upload that file through this profile's own bot token to this same chat.",
+            "Attachment context guardrail: the prompt may include internal attachment metadata such as local paths, file counts, dimensions, or saved-file notices. Use that context silently to inspect files. Do not echo upload confirmations, local paths, dimensions, file counts, or phrases like 'Telegram photo received' back to the user unless the user explicitly asks for technical attachment details.",
             f"Telegram sender: {telegram_user}",
             "Loaded supervisor identity:",
             self._identity_prompt_block(),
@@ -3217,7 +2617,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return ""
         rows = self.message_store.recent_context_rows(chat_id=chat_id, limit=self.config.shared_context_limit)
         summary = self.message_store.continuity_summary(chat_id=chat_id, recent_limit=self.config.shared_context_limit)
-        if not rows and not summary:
+        recalled_rows = self.message_store.recalled_context_rows(
+            chat_id=chat_id,
+            current_text=current_text,
+            limit=6,
+        )
+        if not rows and not summary and not recalled_rows:
             return ""
         skip_index = -1
         current_text = current_text.strip()
@@ -3235,7 +2640,21 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 continue
             if text:
                 lines.append(f"{role}: {text[:900]}")
-        if not lines and not summary:
+        recalled_lines = []
+        seen_recalled: set[str] = set()
+        for row in recalled_rows:
+            role = "User" if row["role"] == "user" else "Assistant"
+            text = row["text"].strip()
+            if not text:
+                continue
+            compact = " ".join(text.split())
+            if compact in seen_recalled:
+                continue
+            seen_recalled.add(compact)
+            recorded_at = row.get("recorded_at") or ""
+            prefix = f"{recorded_at} " if recorded_at else ""
+            recalled_lines.append(f"{prefix}{role}: {text[:900]}")
+        if not lines and not summary and not recalled_lines:
             return ""
         parts = [
             "Shared BaseClaw continuity context:",
@@ -3243,6 +2662,8 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         ]
         if summary:
             parts.extend(["Rolling conversation summary:", summary])
+        if recalled_lines:
+            parts.extend(["Relevant recalled history from SQLite:", *recalled_lines])
         if lines:
             parts.extend(["Recent messages:", *lines])
         return "\n".join(parts)
@@ -3495,9 +2916,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             f"Whisper model: {self.config.whisper_model_name}\n"
             f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
             f"Voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
-            f"Local speech fallback: {self.config.local_speech_fallback}\n"
-            f"Board polling: {'on' if self.config.board_poll_enabled else 'off'}\n"
-            f"History auto-sync: {'on' if self.config.history_auto_sync_enabled else 'off'}"
+            f"Local speech fallback: {self.config.local_speech_fallback}"
         )
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3536,24 +2955,17 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                     InlineKeyboardButton("Voice", callback_data="menu:voice"),
                 ],
                 [
-                    InlineKeyboardButton("History status", callback_data="menu:history_status"),
-                    InlineKeyboardButton("Sync history", callback_data="menu:history_sync"),
-                ],
-                [
-                    InlineKeyboardButton("Board status", callback_data="menu:board_status"),
                     InlineKeyboardButton("Voice status", callback_data="menu:voice_status"),
                 ],
                 [
                     InlineKeyboardButton("Restart", callback_data="menu:restart"),
                     InlineKeyboardButton("Reset session", callback_data="menu:reset"),
                 ],
-                [InlineKeyboardButton("Update from Source", callback_data="menu:update")],
             ]
         )
         text = (
             "BaseClaw help menu.\n"
-            "Use the buttons below for common operator actions.\n\n"
-            "Board behavior: supervisor-to-supervisor messages should go through targeted shared board entries, so the recipient can handle them with the right context."
+            "Use the buttons below for common operator actions."
         )
         await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
 
@@ -3705,162 +3117,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             event_type="command_voice_toggle_reply",
         )
 
-    async def history_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_history_status",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/history_status",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-
-        text = await self._history_status_text()
-        await self._send_text_message(context, chat_id, text, event_type="command_history_status_reply")
-
-    async def _history_status_text(self) -> str:
-        status = await asyncio.to_thread(self.message_store.history_sync_status)
-        available, detail = self._history_sync_available()
-        return (
-            "History sync status\n"
-            f"Agent: {self.config.history_agent_name}\n"
-            f"Device: {self.config.history_device_name}\n"
-            f"Remote: {self.config.history_remote}\n"
-            f"Remote DB: {self.config.history_remote_db_path}\n"
-            f"Configured: {'yes' if available else 'no'} ({detail})\n\n"
-            f"Eligible local rows: {status['total']}\n"
-            f"Synced: {status['synced']}\n"
-            f"Unsynced: {status['unsynced']}\n"
-            f"Last synced: {status['last_synced'] or 'never'}\n"
-            f"Last error: {status['last_error'] or 'none'}"
-        )
-
-    async def history_sync(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_history_sync",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/history_sync",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-
-        keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
-        try:
-            text = await self._history_sync_text()
-            event_type = "command_history_sync_reply"
-        except Exception as exc:
-            LOGGER.exception("History sync failed chat_id=%s", chat_id)
-            text = f"History sync failed: {exc}"
-            event_type = "command_history_sync_failed"
-        finally:
-            await self._stop_keepalive(keepalive)
-        await self._send_text_message(context, chat_id, text, event_type=event_type)
-
-    async def _history_sync_text(self) -> str:
-        result = await asyncio.to_thread(self._sync_history_to_pi)
-        return (
-            "History sync complete\n"
-            f"Selected: {result.get('selected', 0)}\n"
-            f"Inserted: {result.get('inserted', 0)}\n"
-            f"Skipped duplicates: {result.get('skipped', 0)}\n"
-            f"Remote DB: {result.get('remote_db', self.config.history_remote_db_path)}"
-        )
-
-    async def board_poll_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_board_poll_status",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else "/board_poll_status",
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        await self._send_board_poll_status(context, chat_id, event_type="command_board_poll_status_reply")
-
-    def _board_poll_status_text(self) -> str:
-        return (
-            f"Board polling is {'enabled' if self.config.board_poll_enabled else 'disabled'}.\n"
-            f"Polling loop: {'active' if self.board_poll_loop_active else 'not active'}.\n"
-            f"Interval: {self.config.board_poll_interval_seconds} seconds.\n"
-            f"Board: {self.config.board_remote} {self.config.board_path}"
-        )
-
-    def _board_poll_controls(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Board polling on", callback_data="menu:board_poll_on"),
-                    InlineKeyboardButton("Board polling off", callback_data="menu:board_poll_off"),
-                ]
-            ]
-        )
-
-    async def _send_board_poll_status(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        chat_id: int,
-        *,
-        event_type: str,
-    ) -> None:
-        await self._send_text_message(
-            context,
-            chat_id,
-            self._board_poll_status_text(),
-            event_type=event_type,
-            reply_markup=self._board_poll_controls(),
-        )
-
-    async def board_poll_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._set_board_poll(update, context, enabled=True)
-
-    async def board_poll_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._set_board_poll(update, context, enabled=False)
-
-    async def _set_board_poll(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, enabled: bool) -> None:
-        chat_id = update.effective_chat.id
-        self._record_incoming_message(
-            update,
-            event_type="command_board_poll_on" if enabled else "command_board_poll_off",
-            message_type="command",
-            text=update.effective_message.text if update.effective_message else ("/board_poll_on" if enabled else "/board_poll_off"),
-        )
-        if not self._authorized(chat_id):
-            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
-            return
-        restart_note = await self._set_board_poll_enabled(enabled)
-        await self._send_text_message(
-            context,
-            chat_id,
-            f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}",
-            event_type="command_board_poll_toggle_reply",
-        )
-
-    async def _set_board_poll_enabled(self, enabled: bool) -> str:
-        was_enabled = self.config.board_poll_enabled
-        self.config.board_poll_enabled = enabled
-        await asyncio.to_thread(
-            update_operator_env,
-            {"TELEGRAM_OPERATOR_BOARD_POLL_ENABLED": "true" if enabled else "false"},
-        )
-        if self.board_poll_loop_active:
-            restart_note = "The running polling loop will use this setting on its next interval."
-        else:
-            reason = f" Reason: {self.board_poll_loop_inactive_reason}." if self.board_poll_loop_inactive_reason else ""
-            restart_note = f"The setting is saved, but the polling loop is not active in this process.{reason} Restart after fixing board access."
-        if was_enabled and not enabled:
-            restart_note = "This disables future polling checks in the running process and is saved for restart."
-        elif not was_enabled and enabled and self.board_poll_loop_active:
-            restart_note = "This enables polling in the running process; the loop will check again on its next interval."
-        return restart_note
-
-    async def update_from_pi(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def update_from_source(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
         self._record_incoming_message(
             update,
@@ -3987,6 +3244,18 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             text += "\n\n[PDF extraction truncated before sending to the agent.]"
         return text, truncated
 
+    def _read_text_document(self, text_path: Path, max_chars: int = TEXT_DOCUMENT_MAX_CHARS) -> tuple[str, bool]:
+        raw = text_path.read_bytes()
+        if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+            text = raw.decode("utf-16", errors="replace")
+        else:
+            text = raw.decode("utf-8-sig", errors="replace")
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars]
+            text += "\n\n[Text document truncated before sending to the agent.]"
+        return text, truncated
+
     async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.document:
             return
@@ -3996,6 +3265,7 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         mime_type = document.mime_type or ""
         is_pdf = mime_type.lower() == "application/pdf" or filename.lower().endswith(".pdf")
         is_video_document = is_video_file(filename, mime_type)
+        is_text_file = is_text_document(filename, mime_type)
         document_metadata = {
             "document_file_id": document.file_id,
             "document_file_unique_id": document.file_unique_id,
@@ -4030,11 +3300,67 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
                 source="document",
             )
             return
+        if is_text_file and not is_pdf:
+            keepalive = asyncio.create_task(self._chat_action_keepalive(context, chat_id, ChatAction.TYPING))
+            try:
+                upload_dir = self.config.workdir / "telegram_uploads" / "documents"
+                upload_dir.mkdir(parents=True, exist_ok=True)
+                saved_name = f"{update.message.message_id}_{safe_filename(filename)}"
+                text_path = upload_dir / saved_name
+                telegram_file = await context.bot.get_file(document.file_id)
+                await telegram_file.download_to_drive(custom_path=str(text_path))
+                text_content, truncated = await asyncio.to_thread(self._read_text_document, text_path)
+                document_metadata.update(
+                    {
+                        "saved_path": str(text_path),
+                        "extracted_chars": len(text_content),
+                        "truncated": truncated,
+                    }
+                )
+                self.message_store.append(
+                    direction="in",
+                    event_type="text_document_saved",
+                    chat_id=chat_id,
+                    telegram_message_id=update.message.message_id,
+                    telegram_user_id=update.effective_user.id if update.effective_user else None,
+                    telegram_username=update.effective_user.username if update.effective_user else None,
+                    telegram_full_name=update.effective_user.full_name if update.effective_user else None,
+                    message_type="text_document",
+                    text=update.message.caption,
+                    safe_mode=self.config.safe_mode,
+                    metadata=document_metadata,
+                )
+            except Exception as exc:
+                LOGGER.exception("Text document handling failed chat_id=%s", chat_id)
+                await self._stop_keepalive(keepalive)
+                await self._send_text_message(
+                    context,
+                    chat_id,
+                    f"Text file handling failed before it reached Codex: {exc}",
+                    event_type="text_document_failed",
+                )
+                return
+
+            body = "\n\n".join(
+                [
+                    update.message.caption or "Please read this text file and tell me what is inside.",
+                    "<internal_attachment_context>",
+                    "Text document received.",
+                    f"Filename: {filename}",
+                    f"Saved locally as: {text_path}",
+                    f"Extracted characters: {len(text_content)}",
+                    "</internal_attachment_context>",
+                    "Extracted text document content:",
+                    text_content,
+                ]
+            )
+            await self._process_user_message(update, context, body, keepalive=keepalive)
+            return
         if not is_pdf:
             await self._send_text_message(
                 context,
                 chat_id,
-                "I received a document, but it is not a PDF or video. For now I only handle PDF and video documents.",
+                "I received a document, but it is not a PDF, video, or supported text file.",
                 event_type="unsupported_document",
             )
             return
@@ -4084,10 +3410,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             body = "\n\n".join(
                 [
                     update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "<internal_attachment_context>",
                     "PDF attachment received.",
                     f"Filename: {filename}",
                     f"Saved locally as: {pdf_path}",
                     f"Extracted characters: {extracted_chars}",
+                    "</internal_attachment_context>",
                     "Extracted PDF text:",
                     extracted_text,
                 ]
@@ -4096,10 +3424,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             body = "\n\n".join(
                 [
                     update.message.caption or "Please read this PDF and tell me what is inside.",
+                    "<internal_attachment_context>",
                     "PDF attachment received, but no selectable text could be extracted.",
                     f"Filename: {filename}",
                     f"Saved locally as: {pdf_path}",
                     "This PDF likely needs OCR or vision analysis.",
+                    "</internal_attachment_context>",
                 ]
             )
         await self._process_user_message(update, context, body, keepalive=keepalive)
@@ -4205,9 +3535,11 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         body = "\n\n".join(
             [
                 caption or "Please process this Telegram video attachment.",
+                "<internal_attachment_context>",
                 "Telegram video received.",
                 "\n".join(details),
                 "Preserve the original file and use a working copy for edits.",
+                "</internal_attachment_context>",
             ]
         )
         await self._process_user_message(update, context, body, keepalive=keepalive)
@@ -4373,10 +3705,12 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
 
         body_parts = [
             caption or "Please look at these screenshot attachments and respond to them.",
+            "<internal_attachment_context>",
             f"{'Telegram photo album' if len(images) > 1 else 'Telegram photo'} received.",
             f"Saved image count: {len(images)}",
             "Saved locally as:",
             "\n".join(image_lines),
+            "</internal_attachment_context>",
         ]
         await self._process_user_message(representative, context, "\n\n".join(body_parts), keepalive=keepalive)
 
@@ -4473,6 +3807,65 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             caption=update.message.caption,
             source="video",
         )
+
+    def _local_slash_command_path(self, command: str) -> Optional[Path]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", command):
+            return None
+        command_dir = self.config.workdir / "slash_commands"
+        for suffix in SLASH_COMMAND_EXTENSIONS:
+            path = command_dir / f"{command}{suffix}"
+            if path.is_file():
+                return path
+        return None
+
+    def _local_slash_command_prompt(self, command: str, args: str) -> Optional[str]:
+        path = self._local_slash_command_path(command)
+        if not path:
+            return None
+        try:
+            instructions = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read local slash command /{command}: {exc}") from exc
+        if not instructions:
+            raise RuntimeError(f"Local slash command /{command} is empty: {path.name}")
+        return (
+            f"Local slash command invoked: /{command}\n\n"
+            f"Command instructions from {path.name}:\n"
+            f"{instructions}\n\n"
+            f"User arguments:\n{args.strip() or '(none)'}"
+        )
+
+    async def on_slash_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.message.text:
+            return
+        chat_id = update.effective_chat.id
+        if not self._authorized(chat_id):
+            await self._send_text_message(context, chat_id, "Unauthorized chat.", event_type="unauthorized_chat")
+            return
+        text = update.message.text.strip()
+        token, _, args = text.partition(" ")
+        command = token.lstrip("/").split("@", 1)[0].strip()
+        try:
+            prompt = self._local_slash_command_prompt(command, args)
+        except RuntimeError as exc:
+            await self._send_text_message(context, chat_id, str(exc), event_type="local_slash_command_error")
+            return
+        if not prompt:
+            await self._send_text_message(
+                context,
+                chat_id,
+                f"Unknown command: /{command}. Use /help for built-in commands, or add a local command file under slash_commands.",
+                event_type="unknown_slash_command",
+            )
+            return
+        self._record_incoming_message(
+            update,
+            event_type="local_slash_command",
+            message_type="command",
+            text=update.message.text,
+            metadata={"command": command},
+        )
+        await self._process_user_message(update, context, prompt)
 
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
@@ -4656,31 +4049,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
         if action == "voice":
             await self._send_voice_menu(context, chat_id)
             return
-        if action == "history_status":
-            await self._send_text_message(context, chat_id, await self._history_status_text(), event_type="menu_history_status_reply")
-            return
-        if action == "history_sync":
-            try:
-                text = await self._history_sync_text()
-            except Exception as exc:
-                LOGGER.exception("Menu history sync failed chat_id=%s", chat_id)
-                text = f"History sync failed: {exc}"
-            await self._send_text_message(context, chat_id, text, event_type="menu_history_sync_reply")
-            return
-        if action == "board_status":
-            await self._send_board_poll_status(context, chat_id, event_type="menu_board_status_reply")
-            return
-        if action in {"board_poll_on", "board_poll_off"}:
-            enabled = action == "board_poll_on"
-            restart_note = await self._set_board_poll_enabled(enabled)
-            await self._send_text_message(
-                context,
-                chat_id,
-                f"Board polling {'enabled' if enabled else 'disabled'}. {restart_note}\n\n{self._board_poll_status_text()}",
-                event_type="menu_board_poll_toggle_reply",
-                reply_markup=self._board_poll_controls(),
-            )
-            return
         if action == "voice_status":
             await self._send_text_message(
                 context,
@@ -4699,24 +4067,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             return
         if action == "reset":
             await self._send_reset_confirmation(context, chat_id)
-            return
-        if action == "update":
-            self.pending_manual_updates[chat_id] = self._manual_update_ref()
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="update:cancel"),
-                    ]
-                ]
-            )
-            await self._send_text_message(
-                context,
-                chat_id,
-                self._manual_update_summary(),
-                event_type="menu_update_confirm",
-                reply_markup=keyboard,
-            )
             return
         await self._send_text_message(context, chat_id, "Unknown help menu action.", event_type="menu_unknown_action")
 
@@ -4746,192 +4096,6 @@ print(json.dumps({"selected": len(rows), "inserted": inserted, "skipped": len(ro
             await query.edit_message_text(result[:3900])
         except Exception:
             LOGGER.exception("Failed to edit manual update callback message chat_id=%s", chat_id)
-
-    async def on_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            await self._handle_source_update_callback(update, context)
-        except Exception as exc:
-            LOGGER.exception("Source update callback failed")
-            query = update.callback_query
-            if query:
-                try:
-                    await query.answer(f"Button failed: {exc}", show_alert=True)
-                except Exception:
-                    LOGGER.exception("Failed to answer failed source update callback")
-
-    async def _handle_source_update_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query or not query.data:
-            return
-        message = query.message
-        chat_id = None
-        if message and getattr(message, "chat", None):
-            chat_id = message.chat.id
-        elif update.effective_chat:
-            chat_id = update.effective_chat.id
-        if chat_id is None:
-            await query.answer("Could not identify this chat.", show_alert=True)
-            return
-        if not self._authorized(chat_id):
-            await query.answer("Unauthorized chat.", show_alert=True)
-            return
-
-        parts = query.data.split(":", 2)
-        if len(parts) != 3 or parts[0] != "source":
-            await query.answer()
-            return
-        action, source_update_id = parts[1], parts[2]
-        self._record_callback(update, f"source_{action}", source_update_id)
-        pending = self._load_pending_source_update(source_update_id)
-        if pending is None:
-            await query.answer("This source update card expired. Ask me to refresh board notices.", show_alert=True)
-            if message:
-                try:
-                    await query.edit_message_text("This source update card expired. Ask me to refresh board notices.")
-                except Exception:
-                    LOGGER.exception("Failed to edit expired source update card chat_id=%s", chat_id)
-            return
-        if pending.chat_id != chat_id:
-            await query.answer("This update belongs to a different chat.", show_alert=True)
-            return
-
-        if action == "details":
-            await query.answer("Details sent.")
-            await self._send_text_message(
-                context,
-                chat_id,
-                self._format_source_update_details(pending.entry),
-                event_type="source_update_details",
-                metadata={"source_update_id": source_update_id},
-            )
-            return
-        if action == "later":
-            self._mark_source_update_choice(source_update_id, "later")
-            await query.answer("Deferred.")
-            if message:
-                await query.edit_message_text("Source update deferred for this supervisor.")
-            return
-        if action == "decline":
-            self._mark_source_update_choice(source_update_id, "declined")
-            self.pending_source_updates.pop(source_update_id, None)
-            await query.answer("Declined.")
-            if message:
-                await query.edit_message_text("Source update declined for this supervisor.")
-            return
-        if action != "update":
-            await query.answer("Unknown action.", show_alert=True)
-            return
-
-        result = await asyncio.to_thread(self._pull_source_update, pending)
-        self._mark_source_update_choice(source_update_id, "update_now")
-        self.pending_source_updates.pop(source_update_id, None)
-        await query.answer("Update check finished.")
-        await self._send_text_message(
-            context,
-            chat_id,
-            result,
-            event_type="source_update_result",
-            metadata={"source_update_id": source_update_id},
-        )
-        if message:
-            try:
-                await query.edit_message_text(result[:3900])
-            except Exception:
-                LOGGER.exception("Failed to edit source update card chat_id=%s", chat_id)
-
-    async def on_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        try:
-            await self._handle_board_entry_callback(update, context)
-        except Exception as exc:
-            LOGGER.exception("Board entry callback failed")
-            query = update.callback_query
-            if query:
-                try:
-                    await query.answer(f"Button failed: {exc}", show_alert=True)
-                except Exception:
-                    LOGGER.exception("Failed to answer failed board entry callback")
-
-    async def _handle_board_entry_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        query = update.callback_query
-        if not query or not query.data:
-            return
-        message = query.message
-        chat_id = None
-        if message and getattr(message, "chat", None):
-            chat_id = message.chat.id
-        elif update.effective_chat:
-            chat_id = update.effective_chat.id
-        if chat_id is None:
-            await query.answer("Could not identify this chat.", show_alert=True)
-            return
-        if not self._authorized(chat_id):
-            await query.answer("Unauthorized chat.", show_alert=True)
-            return
-
-        parts = query.data.split(":", 2)
-        if len(parts) != 3 or parts[0] != "board":
-            await query.answer()
-            return
-        action, board_entry_id = parts[1], parts[2]
-        self._record_callback(update, f"board_{action}", board_entry_id)
-        pending = self._load_pending_board_entry(board_entry_id)
-        if pending is None:
-            await query.answer("This board card expired. Ask me to refresh board notices.", show_alert=True)
-            if message:
-                try:
-                    await query.edit_message_text("This board card expired. Ask me to refresh board notices.")
-                except Exception:
-                    LOGGER.exception("Failed to edit expired board entry card chat_id=%s", chat_id)
-            return
-        if pending.chat_id != chat_id:
-            await query.answer("This board entry belongs to a different chat.", show_alert=True)
-            return
-
-        if action == "details":
-            await query.answer("Details sent.")
-            await self._send_text_message(
-                context,
-                chat_id,
-                self._format_board_entry_details(pending.entry),
-                event_type="board_entry_details",
-                metadata={"board_entry_id": board_entry_id},
-            )
-            return
-        if action == "later":
-            self._mark_board_entry_choice(board_entry_id, "later")
-            await query.answer("Deferred.")
-            if message:
-                await query.edit_message_text("Board entry deferred for this supervisor.")
-            return
-        if action == "dismiss":
-            self._mark_board_entry_choice(board_entry_id, "dismissed")
-            self.pending_board_entries.pop(board_entry_id, None)
-            await query.answer("Dismissed.")
-            if message:
-                await query.edit_message_text("Board entry dismissed for this supervisor.")
-            return
-        if action != "proceed":
-            await query.answer("Unknown action.", show_alert=True)
-            return
-
-        self._mark_board_entry_choice(board_entry_id, "proceed")
-        self.pending_board_entries.pop(board_entry_id, None)
-        await query.answer("Proceeding.")
-        if message:
-            try:
-                await query.edit_message_text("Proceeding with this board entry.")
-            except Exception:
-                LOGGER.exception("Failed to edit board entry card chat_id=%s", chat_id)
-        prompt = self._build_board_entry_prompt(pending.entry)
-        asyncio.create_task(
-            self._process_user_message(
-                update,
-                context,
-                prompt,
-                transcript=None,
-                approved_proposal="User clicked Proceed on a shared board entry inline keyboard.",
-            )
-        )
 
     async def _run_approved_pending(self, context: ContextTypes.DEFAULT_TYPE, pending: PendingApproval) -> None:
         class ApprovalUser:
@@ -4972,24 +4136,13 @@ def load_config() -> OperatorConfig:
     action_mode = os.environ.get("TELEGRAM_OPERATOR_ACTION_MODE", "").strip().lower()
     if action_mode not in {"read", "approve", "full"}:
         action_mode = "approve" if safety_mode == "restricted" else "full"
-    history_remote = os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE", "").strip()
-    history_ssh_key_path = resolve_app_path(
-        os.environ.get("TELEGRAM_OPERATOR_HISTORY_SSH_KEY", ""),
-        BASE_DIR / "telegram_operator_board_ed25519",
-    )
-    history_known_hosts_path = resolve_app_path(
-        os.environ.get("TELEGRAM_OPERATOR_HISTORY_KNOWN_HOSTS", ""),
-        BASE_DIR / "telegram_operator_board_known_hosts",
-    )
-    history_agent_name = os.environ.get("TELEGRAM_OPERATOR_HISTORY_AGENT", "baseclaw").strip() or "baseclaw"
     supervisor_id = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ID", "").strip()
     if not supervisor_id:
-        supervisor_id = f"{history_agent_name}-supervisor" if history_agent_name else "local-supervisor"
+        supervisor_id = "local-supervisor"
     supervisor_name = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_NAME", "").strip() or supervisor_id
     supervisor_role = os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_ROLE", "").strip() or "unspecified"
     supervisor_device_label = (
         os.environ.get("TELEGRAM_OPERATOR_SUPERVISOR_DEVICE_LABEL", "").strip()
-        or os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", "").strip()
         or os.environ.get("COMPUTERNAME", "").strip()
         or socket.gethostname()
     )
@@ -5003,12 +4156,6 @@ def load_config() -> OperatorConfig:
             "Do not infer identity from stale chat memory,Do not review your own source update as independent review",
         )
     )
-    board_aliases = parse_csv_list(
-        os.environ.get(
-            "TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES",
-            f"{supervisor_id},{history_agent_name},developer-agent",
-        )
-    )
     jcode_provider_id = os.environ.get("TELEGRAM_OPERATOR_MODEL_PROVIDER", "").strip().lower()
     jcode_base_url = os.environ.get("TELEGRAM_OPERATOR_LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1").strip()
     if jcode_provider_id in {"lmstudio", "ollama"}:
@@ -5016,7 +4163,7 @@ def load_config() -> OperatorConfig:
         llm_port = "11434" if jcode_provider_id == "ollama" else "1234"
         jcode_base_url = build_host_url(remote_host, llm_port, "/v1")
     return OperatorConfig(
-        bot_token=require_env("TELEGRAM_BOT_TOKEN"),
+        bot_token=require_bot_token(),
         allowed_chat_ids=parse_allowed_chat_ids(require_env("TELEGRAM_ALLOWED_CHAT_IDS")),
         workdir=resolve_app_path(os.environ.get("TELEGRAM_OPERATOR_WORKDIR", ""), DEFAULT_WORKSPACE),
         access_scope=access_scope,
@@ -5040,34 +4187,13 @@ def load_config() -> OperatorConfig:
         jcode_api_key=os.environ.get("TELEGRAM_OPERATOR_JCODE_API_KEY", ""),
         jcode_provider_profile=os.environ.get("TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE", ""),
         jcode_base_url=jcode_base_url,
-        shared_context_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", ""), False),
+        shared_context_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED", ""), True),
         shared_context_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_SHARED_CONTEXT_LIMIT", ""), 12),
         safety_mode=safety_mode,
         safe_mode=action_mode != "full" or access_scope != "full",
         supervisor_id=supervisor_id,
         supervisor_name=supervisor_name,
         supervisor_role=supervisor_role,
-        history_agent_name=history_agent_name,
-        history_device_name=os.environ.get("TELEGRAM_OPERATOR_HISTORY_DEVICE", os.environ.get("COMPUTERNAME", "unknown-device")).strip() or "unknown-device",
-        history_remote=history_remote,
-        history_remote_db_path=os.environ.get("TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH", "").strip(),
-        history_ssh_key_path=history_ssh_key_path,
-        history_known_hosts_path=history_known_hosts_path,
-        history_sync_limit=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_HISTORY_SYNC_LIMIT", ""), 250),
-        history_auto_sync_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED", ""), True),
-        history_auto_sync_interval_seconds=parse_positive_int(
-            os.environ.get("TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_INTERVAL_SECONDS", ""),
-            300,
-        ),
-        board_poll_enabled=parse_bool(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_ENABLED", ""), True),
-        board_poll_interval_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_BOARD_POLL_INTERVAL_SECONDS", ""), 180),
-        board_remote=os.environ.get("TELEGRAM_OPERATOR_BOARD_REMOTE", history_remote).strip(),
-        board_path=os.environ.get("TELEGRAM_OPERATOR_BOARD_PATH", "").strip(),
-        board_state_path=resolve_app_path(
-            os.environ.get("TELEGRAM_OPERATOR_BOARD_STATE_PATH", ""),
-            BASE_DIR / "telegram_operator_board_state.json",
-        ),
-        board_agent_aliases=board_aliases,
         source_update_remote=os.environ.get("TELEGRAM_OPERATOR_SOURCE_UPDATE_REMOTE", "").strip(),
         manual_update_ref=os.environ.get("TELEGRAM_OPERATOR_MANUAL_UPDATE_REF", DEFAULT_MANUAL_UPDATE_REF).strip()
         or DEFAULT_MANUAL_UPDATE_REF,
@@ -5109,31 +4235,23 @@ async def main() -> None:
     application.add_handler(CommandHandler("voice_status", operator.voice_status))
     application.add_handler(CommandHandler("voice_on", operator.voice_on))
     application.add_handler(CommandHandler("voice_off", operator.voice_off))
-    application.add_handler(CommandHandler("history_status", operator.history_status))
-    application.add_handler(CommandHandler("history_sync", operator.history_sync))
-    application.add_handler(CommandHandler("board_poll_status", operator.board_poll_status))
-    application.add_handler(CommandHandler("board_poll_on", operator.board_poll_on))
-    application.add_handler(CommandHandler("board_poll_off", operator.board_poll_off))
-    application.add_handler(CommandHandler("update", operator.update_from_pi))
+    application.add_handler(CommandHandler("update", operator.update_from_source))
     application.add_handler(CommandHandler("restart_operator", operator.restart_operator))
     application.add_handler(CommandHandler("restart", operator.restart_operator))
     application.add_handler(CallbackQueryHandler(operator.on_menu_callback, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(operator.on_reset_callback, pattern=r"^reset:"))
     application.add_handler(CallbackQueryHandler(operator.on_manual_update_callback, pattern=r"^update:"))
     application.add_handler(CallbackQueryHandler(operator.on_voice_callback, pattern=r"^voice:"))
-    application.add_handler(CallbackQueryHandler(operator.on_source_update_callback, pattern=r"^source:"))
-    application.add_handler(CallbackQueryHandler(operator.on_board_entry_callback, pattern=r"^board:"))
     application.add_handler(CallbackQueryHandler(operator.on_approval_callback, pattern=r"^safe:"))
     application.add_handler(MessageHandler(filters.VIDEO, operator.on_video))
     application.add_handler(MessageHandler(filters.Document.ALL, operator.on_document))
     application.add_handler(MessageHandler(filters.PHOTO, operator.on_photo))
     application.add_handler(MessageHandler(filters.VOICE, operator.on_voice))
+    application.add_handler(MessageHandler(filters.COMMAND, operator.on_slash_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, operator.on_text))
     await application.initialize()
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-    board_task = asyncio.create_task(operator.board_poll_loop(application))
-    history_sync_task = asyncio.create_task(operator.history_auto_sync_loop())
     if config.startup_notice:
         for chat_id in config.allowed_chat_ids:
             try:
@@ -5146,16 +4264,6 @@ async def main() -> None:
     try:
         await asyncio.Event().wait()
     finally:
-        board_task.cancel()
-        history_sync_task.cancel()
-        try:
-            await board_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await history_sync_task
-        except asyncio.CancelledError:
-            pass
         await application.updater.stop()
         await application.stop()
         await application.shutdown()

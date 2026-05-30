@@ -5,7 +5,7 @@ Add-Type -AssemblyName System.Drawing
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $installScript = Join-Path $projectRoot "install.ps1"
-$startScript = Join-Path $projectRoot "start-ui.ps1"
+$startScript = Join-Path $projectRoot "launchers\windows\start-ui.ps1"
 
 function New-Label {
     param([string]$Text, [int]$X, [int]$Y, [int]$Width = 430, [int]$Height = 24)

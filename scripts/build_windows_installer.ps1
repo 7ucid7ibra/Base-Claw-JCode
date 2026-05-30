@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $stageDir = Join-Path $projectRoot "dist\windows-installer-stage"
-$issPath = Join-Path $projectRoot "installer\baseclaw.iss"
+$issPath = Join-Path $projectRoot "packaging\windows\baseclaw.iss"
 
 function Resolve-InnoCompiler {
     $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
@@ -69,8 +69,7 @@ $excludeFiles = @(
     "telegram_operator_*.jsonl",
     "telegram_operator_messages.sqlite3",
     "telegram_operator_messages.sqlite3-*",
-    "telegram_operator_state.json",
-    "telegram_operator_board_state.json"
+    "telegram_operator_state.json"
 )
 
 $robocopyArgs = @(

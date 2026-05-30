@@ -10,23 +10,28 @@ Factory settings:
 - Treat the Telegram conversation, speech interface, Codex access, and message journal as the baseline body of the assistant.
 - Do not turn the assistant into a large framework before the need is clear.
 
-Workspace map:
+Local folder map:
 
-- `agent/`: the assistant's inner equipment.
-- `agent/skills/`: capabilities the assistant learns or installs, including MCP servers, CLI tools, reusable scripts, integration notes, and local skill instructions.
-- `agent/memory/`: durable user preferences, summaries, facts, relationship context, and experiments with persistent memory systems.
-- `agent/senses/`: inputs and perception adapters, such as speech transcription, screenshots, browser observation, file watchers, or future sensors.
-- `work/`: things the assistant is doing or helping the user make.
-- `work/prototypes/notes/`: early ideas, things to remember for later, rough plans, and possible project seeds.
-- `work/prototypes/builds/`: quick experiments, mockups, throwaway implementations, and proof-of-concept work.
-- `work/projects/`: real user-facing work, grouped by project. Each project can contain its own plan, notes, source, assets, and decisions.
-- `work/routines/`: recurring tasks, monitors, reminders, scheduled checks, and background workflows.
+- `skills/`: local capabilities the assistant can use or maintain, including MCP notes, CLI wrappers, reusable scripts, and skill instructions.
+- `automations/`: repeatable workflows, scheduled checks, monitors, reminders, and other routines.
+- `projects/`: real user work, such as apps, websites, research folders, prototypes that became serious, and project-specific plans.
+- `slash_commands/`: local command definitions, command templates, and notes for user-defined shortcuts.
+- `notes/`: loose notes, rough plans, observations, and ideas that do not belong to a specific project yet.
+- `scratch/`: temporary tests and throwaway experiments.
+- `artifacts/`: generated files meant to be inspected, shared, or handed back to the user.
+- `uploads/`: local attachment intake and files saved from conversations.
 
 Guidance:
 
 - Put new material in the smallest folder that honestly fits.
-- When the user has a loose idea, write it down under `work/prototypes/notes/`.
-- When the idea needs exploration, build or test it under `work/prototypes/builds/`.
-- When a prototype becomes real work, create a project folder under `work/projects/` and keep its plan beside the project.
-- Keep assistant-internal plans under `agent/` only when they are about the assistant's own capabilities.
+- When the user has a loose idea, write it down under `notes/`.
+- When the idea needs exploration, test it under `scratch/`.
+- When a prototype becomes real work, create a project folder under `projects/` and keep its plan beside the project.
+- Keep reusable assistant behavior under `skills/`, `automations/`, or `slash_commands/` instead of editing BaseClaw core.
 - Do not install or invent permanent capabilities without a user goal or an explicit experiment.
+
+Git policy:
+
+- BaseClaw tracks this `AGENT_HOME.md` file as the starter note.
+- The other folders in this workspace are local runtime/private space and are ignored by git.
+- Move something out of this workspace only when it is meant to become public source, documentation, or a shareable example.

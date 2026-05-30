@@ -55,7 +55,7 @@ python app\kokoro_server.py
 Or on Windows:
 
 ```powershell
-.\start-kokoro.ps1
+.\launchers\windows\start-kokoro.ps1
 ```
 
 The server listens on `http://0.0.0.0:8766`. Use `http://127.0.0.1:8766` on the same machine.
@@ -93,7 +93,7 @@ Invoke-RestMethod http://127.0.0.1:8766/voices
 That response now includes:
 
 - `voices`: stock voices already cached from `hexgrad/Kokoro-82M`
-- `custom_voices`: local `.pt` voice packs found in `custom_voices/`
+- `custom_voices`: local `.pt` voice packs found in `voice_assets/custom/`
 
 Synthesize WAV:
 
@@ -202,7 +202,7 @@ British:
 
 ## Optional Community Voices
 
-Place compatible community voice `.pt` files in `custom_voices/`. The fresh checkout includes only a README placeholder; model files are ignored by git.
+Place compatible community voice `.pt` files in `voice_assets/custom/`. The fresh checkout includes only a README placeholder; model files are ignored by git.
 
 Examples previously tested on the development machine:
 
@@ -212,7 +212,7 @@ Examples previously tested on the development machine:
 
 ## Optional German Kokoro Voices
 
-Place compatible German Kokoro assets in `kokoro_german/` and `german_kokoro/`. The fresh checkout includes only README placeholders; model files are ignored by git.
+Place compatible German Kokoro assets in `voice_assets/german_package/` and `voice_assets/german/`. The fresh checkout includes only README placeholders; model files are ignored by git.
 
 Examples previously tested on the development machine:
 

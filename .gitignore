@@ -3,12 +3,14 @@
 .env.*
 !.env.telegram-operator.example
 telegram_operator_state.json
-telegram_operator_board_state.json
 telegram_operator_memory.jsonl
 telegram_operator_messages.sqlite3
-telegram_operator_board_ed25519
-telegram_operator_board_known_hosts
+telegram_operator_*_ed25519
+telegram_operator_*_known_hosts
 .baseclaw-install.conf
+.baseclaw-version.json
+.local-update-backups/
+*.pid
 *.sqlite3
 *.sqlite3-*
 *.log
@@ -32,8 +34,29 @@ build/
 *.jpg
 *.jpeg
 *.webp
+*.pt
+*.pth
+*.safetensors
 .DS_Store
 .cache/
+
+# Default local assistant workspace. Keep only the public folder map.
+agent_workspace/*
+!agent_workspace/AGENT_HOME.md
+
+# Optional local TTS assets. Keep only the small README placeholders in git.
+voice_assets/custom/*
+!voice_assets/custom/README.md
+voice_assets/german/*
+!voice_assets/german/README.md
+!voice_assets/german/voices/
+voice_assets/german/voices/*
+!voice_assets/german/voices/README.md
+voice_assets/german_package/*
+!voice_assets/german_package/README.md
+custom_voices/
+german_kokoro/
+kokoro_german/
 
 # Local-only assets and experiments
 external/
@@ -41,3 +64,5 @@ smoke/
 tools/
 models/
 profiles/
+overlays/private/
+overlays/*.local/

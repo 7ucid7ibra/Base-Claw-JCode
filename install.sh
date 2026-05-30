@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 CONFIG_PATH=".baseclaw-install.conf"
-PUBLIC_REPO_URL="https://github.com/7ucid7ibra/Base-Claw"
 YES=0
 LAUNCH=1
 WITH_KOKORO=""
@@ -65,6 +64,7 @@ fi
 if [[ -z "$WITH_KOKORO" && "${BASECLAW_WITH_KOKORO:-}" =~ ^[01]$ ]]; then
   WITH_KOKORO="$BASECLAW_WITH_KOKORO"
 fi
+BASECLAW_UPDATE_SOURCE_URL="${BASECLAW_UPDATE_SOURCE_URL:-}"
 
 say() {
   printf '\n%s\n' "$*"
@@ -95,20 +95,57 @@ import tkinter
 PY
 }
 
+python_version_ok() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
+python_version_label() {
+  "$1" - <<'PY' 2>/dev/null || printf 'unknown'
+import sys
+print(".".join(map(str, sys.version_info[:3])))
+PY
+}
+
 python_bin() {
-  local fallback=""
   local name path
-  for name in python3.12 python3.11 python3; do
+  for name in python3.12 python3.11 python3.10 python3; do
     if have "$name"; then
       path="$(command -v "$name")"
-      [[ -z "$fallback" ]] && fallback="$path"
-      if python_has_tkinter "$path"; then
+      if python_version_ok "$path" && python_has_tkinter "$path"; then
         echo "$path"
         return
       fi
     fi
   done
-  echo "$fallback"
+  for name in python3.12 python3.11 python3.10 python3; do
+    if have "$name"; then
+      path="$(command -v "$name")"
+      if python_version_ok "$path"; then
+        echo "$path"
+        return
+      fi
+    fi
+  done
+  for name in python3.12 python3.11 python3.10 python3; do
+    if have "$name"; then
+      command -v "$name"
+      return
+    fi
+  done
+}
+
+install_supported_python() {
+  if [[ "$(uname -s)" != "Darwin" ]] || ! have brew; then
+    return 1
+  fi
+  if ask "Install Python 3.12 and Tkinter with Homebrew?" "y"; then
+    brew install python@3.12 python-tk@3.12
+    return 0
+  fi
+  return 1
 }
 
 ensure_node_tool() {
@@ -128,7 +165,12 @@ ensure_node_tool() {
     return
   fi
   if ask "Install $label globally with npm?" "y"; then
-    npm install -g "$package"
+    if npm install -g "$package"; then
+      say "$label installed."
+    else
+      say "$label install failed. This optional step is being skipped."
+      say "If npm reports EACCES, fix your npm global permissions or install $label manually, then rerun ./install.sh --setup."
+    fi
   else
     say "Skipped $label."
   fi
@@ -234,8 +276,18 @@ setup_venv() {
   local requirements="$2"
   local py
   py="$(python_bin)"
+  if [[ -z "$py" ]] || ! python_version_ok "$py"; then
+    if install_supported_python; then
+      py="$(python_bin)"
+    fi
+  fi
   if [[ -z "$py" ]]; then
-    say "Python 3 was not found. Install Python 3.11+ first."
+    say "Python 3.11 or newer was not found. Install Python 3.11+ first, then rerun ./install.sh."
+    exit 1
+  fi
+  if ! python_version_ok "$py"; then
+    say "Python 3.11 or newer is required, but $py is $(python_version_label "$py")."
+    say "Install Python 3.11+ first, then rerun ./install.sh."
     exit 1
   fi
   if [[ "$venv" == ".venv-telegram-agent" ]]; then
@@ -247,6 +299,10 @@ setup_venv() {
     fi
   fi
   if [[ ! -d "$venv" ]]; then
+    "$py" -m venv "$venv"
+  elif ! python_version_ok "$venv/bin/python"; then
+    say "Recreating $venv because it was made with Python $(python_version_label "$venv/bin/python")."
+    rm -rf "$venv"
     "$py" -m venv "$venv"
   fi
   if [[ "$venv" == ".venv-telegram-agent" ]] && ! python_has_tkinter "$venv/bin/python"; then
@@ -305,6 +361,9 @@ write_install_config() {
 # Re-run ./install.sh --setup to change optional install choices.
 BASECLAW_WITH_KOKORO=$kokoro
 EOF
+  if [[ -n "${BASECLAW_UPDATE_SOURCE_URL:-}" ]]; then
+    printf 'BASECLAW_UPDATE_SOURCE_URL=%q\n' "$BASECLAW_UPDATE_SOURCE_URL" >> "$CONFIG_PATH"
+  fi
 }
 
 install_macos_launcher() {
@@ -314,6 +373,18 @@ install_macos_launcher() {
   if [[ -x "scripts/install_macos_launcher.sh" ]]; then
     "scripts/install_macos_launcher.sh" || say "Could not create the macOS launcher. You can still start BaseClaw with ./start.sh."
   fi
+}
+
+ensure_workspace_layout() {
+  mkdir -p \
+    "agent_workspace/skills" \
+    "agent_workspace/automations" \
+    "agent_workspace/projects" \
+    "agent_workspace/slash_commands" \
+    "agent_workspace/notes" \
+    "agent_workspace/scratch" \
+    "agent_workspace/artifacts" \
+    "agent_workspace/uploads"
 }
 
 say "BaseClaw setup"
@@ -327,6 +398,8 @@ if [[ ! -f ".env.telegram-operator" && -f ".env.telegram-operator.example" ]]; t
   cp ".env.telegram-operator.example" ".env.telegram-operator"
   say "Created .env.telegram-operator from the example. Open settings to enter your bot token and chat id."
 fi
+
+ensure_workspace_layout
 
 say "Setting up Python UI/operator environment..."
 setup_venv ".venv-telegram-agent" "requirements/telegram-operator.txt"

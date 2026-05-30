@@ -11,7 +11,7 @@ It supports:
 - JCode with local or hosted model providers.
 - Direct Codex CLI and Claude CLI modes.
 - Safety and access controls for local filesystem work.
-- Per-chat session state, local message logs, and optional shared history sync.
+- Per-chat session state, local message logs, and local slash-command files.
 
 ## Trust Model
 
@@ -77,11 +77,11 @@ Key settings:
 - `TELEGRAM_OPERATOR_JCODE_PROVIDER_PROFILE`: optional advanced JCode profile. Leave it empty for the normal UI flow.
 - `TELEGRAM_OPERATOR_JCODE_API_KEY`: optional key for hosted JCode providers.
 - `TELEGRAM_OPERATOR_CODEX_MODEL`: model name passed to the selected harness when supported.
-- `TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED`: optional rolling continuity summary and recent chat context injection across Telegram, desktop, and harness switches.
+- `TELEGRAM_OPERATOR_SHARED_CONTEXT_ENABLED`: rolling continuity summary, recent chat context injection, and keyword recall from older SQLite history across Telegram, desktop, and harness switches.
 
 The desktop UI supports named agent profiles. The `main` profile uses the root `.env.telegram-operator` and root runtime files for backward compatibility. Additional profiles live under `profiles/<name>/` and have their own env file, workspace, SQLite message history, session state, memory log, and operator log. Starting a profile launches a separate operator process, so different Telegram bot tokens can run simultaneously from the same install. Deleting a non-main profile stops that profile and removes its local profile folder.
 
-For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse incompatible session ids. If shared context injection is enabled, BaseClaw also adds a rolling continuity summary plus a compact recent chat-history block to each prompt; old messages are explicitly marked as context, not new instructions.
+For LM Studio and Ollama, BaseClaw creates a small JCode provider profile from the configured Host IP/name and LLM port before each run. This keeps JCode pointed at the selected remote model host instead of silently using a local default. Session resume state is stored per harness, so switching between Claude, Codex, Gemini, and JCode does not reuse incompatible session ids. If shared context injection is enabled, BaseClaw also adds a rolling continuity summary, a compact recent chat-history block, and a few keyword-matched older SQLite history entries to each prompt; old messages are explicitly marked as context, not new instructions.
 
 ## Safety And Access
 
@@ -112,29 +112,6 @@ Kokoro and Whisper can run locally or on a separate reachable host.
 
 The UI can discover voices from the active Kokoro host. Selecting a voice persists the voice and inferred language code.
 
-## Optional Shared History And Board
-
-The operator can keep local raw chat history and optionally sync it to a shared SQLite database over SSH. This is useful when several trusted machines should coordinate, but it is disabled by default.
-
-Relevant settings:
-
-- `TELEGRAM_OPERATOR_HISTORY_AGENT`
-- `TELEGRAM_OPERATOR_HISTORY_DEVICE`
-- `TELEGRAM_OPERATOR_HISTORY_REMOTE`
-- `TELEGRAM_OPERATOR_HISTORY_REMOTE_DB_PATH`
-- `TELEGRAM_OPERATOR_HISTORY_AUTO_SYNC_ENABLED`
-
-The optional shared board poller can watch a remote newline-delimited JSON file for coordination notices. It only sends Telegram notices; it does not run implementation tasks automatically.
-
-Relevant settings:
-
-- `TELEGRAM_OPERATOR_BOARD_POLL_ENABLED`
-- `TELEGRAM_OPERATOR_BOARD_REMOTE`
-- `TELEGRAM_OPERATOR_BOARD_PATH`
-- `TELEGRAM_OPERATOR_BOARD_AGENT_ALIASES`
-
-Leave these settings empty for a normal single-machine install.
-
 ## Run
 
 Install and open the UI:
@@ -163,10 +140,17 @@ python app/telegram_codex_operator.py
 - `/status`
 - `/reset`
 - `/voice`
-- `/history_status`
-- `/history_sync`
+- `/voice_status`
+- `/voice_on`
+- `/voice_off`
+- `/update`
+- `/restart`
+
+Unknown slash commands are checked against local files in the current workspace's `slash_commands/` folder. For example, `/summarize notes.md` can load `agent_workspace/slash_commands/summarize.md` and send its instructions plus the user arguments to the selected agent. These local command files are ignored by git and are not part of BaseClaw source.
 
 Text and voice requests are routed to the selected harness. The bridge keeps Telegram typing or recording indicators active until the final reply is delivered, and sends compact progress updates during longer runs.
+
+Written replies and spoken replies are separated before TTS. The Telegram text can include full links, file paths, and code, while the Kokoro voice note receives a spoken-friendly version that shortens URLs to domains, abbreviates file paths to names, and skips fenced code blocks.
 
 ## Persistence
 
@@ -175,7 +159,6 @@ Local runtime state is intentionally ignored by git:
 - `telegram_operator_state.json`
 - `telegram_operator_memory.jsonl`
 - `telegram_operator_messages.sqlite3`
-- `telegram_operator_board_state.json`
 
 The SQLite database records message metadata, transcripts, callbacks, outgoing replies, and completed agent-turn metadata.
 

@@ -14,6 +14,11 @@ scripts/
   start_kokoro_server.ps1
   start_telegram_operator_ui.ps1
   run_telegram_codex_operator.ps1
+launchers/
+  macos/
+  windows/
+packaging/
+  windows/
 requirements/
   client.txt
   kokoro.txt
@@ -24,17 +29,22 @@ docs/
   TELEGRAM_CODEX_OPERATOR.md
   TROUBLESHOOTING.md
   PUBLISHING.md
+overlays/
+  README.md
 agent_workspace/
-custom_voices/
-german_kokoro/
-kokoro_german/
+  AGENT_HOME.md
+voice_assets/
+  custom/
+  german/
+  german_package/
 ```
 
 Root convenience scripts:
 
 - `install.ps1`
-- `start-kokoro.ps1`
-- `start-ui.ps1`
-- `run-operator.ps1`
+- `install.sh`
+- `start.sh`
 
-Runtime files such as `.env.telegram-operator`, `profiles/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
+Runtime files such as `.env.telegram-operator`, `profiles/`, `overlays/private/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
+
+Only `agent_workspace/AGENT_HOME.md` is tracked. The installer and UI create ignored local workspace folders such as `skills/`, `automations/`, `projects/`, `slash_commands/`, `notes/`, `scratch/`, `artifacts/`, and `uploads/` for each workspace.
