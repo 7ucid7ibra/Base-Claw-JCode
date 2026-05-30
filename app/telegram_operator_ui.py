@@ -2520,6 +2520,8 @@ class OperatorUi(ctk.CTk):
             messagebox.showinfo("Saved", f"Saved settings to {self.env_path}")
 
     def send_ui_startup_notice(self) -> None:
+        if parse_bool(os.environ.get("BASECLAW_SUPPRESS_STARTUP_NOTICE_ONCE", ""), False):
+            return
         values = self.current_values()
         if not parse_bool(values.get("TELEGRAM_OPERATOR_STARTUP_NOTICE", ""), True):
             return
@@ -3453,12 +3455,14 @@ class OperatorUi(ctk.CTk):
     def _running_operator_profiles(self) -> list[str]:
         return [profile for profile in list_profiles() if root_operator_processes(profile_env_path(profile))]
 
-    def _start_operator_process_for_profile(self, profile: str) -> None:
+    def _start_operator_process_for_profile(self, profile: str, *, suppress_startup_notice: bool = False) -> None:
         profile_env = profile_env_path(profile)
         values = self._profile_values(profile)
         ensure_workspace_layout(Path(values["TELEGRAM_OPERATOR_WORKDIR"]))
         env = dict(os.environ)
         env["BASECLAW_OPERATOR_ENV_PATH"] = str(profile_env)
+        if suppress_startup_notice:
+            env["BASECLAW_SUPPRESS_STARTUP_NOTICE_ONCE"] = "1"
         if sys.platform.startswith("win"):
             powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
             subprocess.Popen(
@@ -3475,14 +3479,14 @@ class OperatorUi(ctk.CTk):
                 start_new_session=True,
             )
 
-    def _restart_operator_profiles(self, profiles: list[str]) -> tuple[int, list[str]]:
+    def _restart_operator_profiles(self, profiles: list[str], *, suppress_startup_notice: bool = False) -> tuple[int, list[str]]:
         restarted: list[str] = []
         failed: list[str] = []
         for profile in profiles:
             profile_env = profile_env_path(profile)
             try:
                 self._kill_operator_processes_for_env(profile_env, show_errors=False)
-                self._start_operator_process_for_profile(profile)
+                self._start_operator_process_for_profile(profile, suppress_startup_notice=suppress_startup_notice)
                 restarted.append(profile)
             except Exception:
                 failed.append(profile)
@@ -3504,7 +3508,11 @@ class OperatorUi(ctk.CTk):
         running_profiles = self._running_operator_profiles()
         if not messagebox.askyesno(
             "Update BaseClaw",
-            f"Pull the newest BaseClaw update from GitHub and overlay it onto this install?\n\nSource: {UPDATE_SOURCE_URL}\n\nAfter a successful update, BaseClaw will restart {len(running_profiles)} running operator profile(s).",
+            "Install the latest BaseClaw update now?\n\n"
+            "BaseClaw will download the update, keep a local backup if needed, "
+            "then restart the app once so the new interface is loaded.\n\n"
+            f"Running bridge profiles: {len(running_profiles)}\n"
+            f"Source: {UPDATE_SOURCE_URL}",
         ):
             return
         if self.update_button:
@@ -3523,7 +3531,7 @@ class OperatorUi(ctk.CTk):
         if ok:
             restart_detail = ""
             if running_profiles:
-                restarted, failed = self._restart_operator_profiles(running_profiles)
+                restarted, failed = self._restart_operator_profiles(running_profiles, suppress_startup_notice=True)
                 restart_detail = f" Restarted {restarted} operator profile(s)."
                 if failed:
                     restart_detail += f" Failed to restart: {', '.join(failed)}."
@@ -3531,20 +3539,17 @@ class OperatorUi(ctk.CTk):
             self.update_detail = ""
             self._refresh_update_button()
             self.set_status("Updated", detail + restart_detail, True)
-            restart = messagebox.askyesno(
-                "Update complete",
-                f"{detail}{restart_detail}\n\nRestart the BaseClaw UI now to load the updated interface?",
-            )
-            if restart:
-                self.restart_ui_process()
+            self.restart_ui_process(suppress_startup_notice=True)
         else:
             self.set_status("Update failed", detail, False)
             messagebox.showerror("Update failed", detail)
 
-    def restart_ui_process(self) -> None:
+    def restart_ui_process(self, *, suppress_startup_notice: bool = False) -> None:
         self.save(show_message=False)
         env = dict(os.environ)
         env["BASECLAW_OPERATOR_ENV_PATH"] = str(self.env_path)
+        if suppress_startup_notice:
+            env["BASECLAW_SUPPRESS_STARTUP_NOTICE_ONCE"] = "1"
         kwargs: dict[str, Any] = {
             "cwd": str(BASE_DIR),
             "env": env,

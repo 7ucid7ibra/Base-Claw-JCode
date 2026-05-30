@@ -4178,7 +4178,10 @@ def load_config() -> OperatorConfig:
         whisper_urls=speech_urls,
         whisper_model_name=os.environ.get("TELEGRAM_OPERATOR_WHISPER_MODEL", "base"),
         local_speech_fallback=local_speech_fallback,
-        startup_notice=parse_bool(os.environ.get("TELEGRAM_OPERATOR_STARTUP_NOTICE", ""), True),
+        startup_notice=(
+            parse_bool(os.environ.get("TELEGRAM_OPERATOR_STARTUP_NOTICE", ""), True)
+            and not parse_bool(os.environ.get("BASECLAW_SUPPRESS_STARTUP_NOTICE_ONCE", ""), False)
+        ),
         agent_provider=os.environ.get("TELEGRAM_OPERATOR_PROVIDER", "codex"),
         agent_command=os.environ.get("TELEGRAM_OPERATOR_AGENT_COMMAND", ""),
         agent_timeout_seconds=parse_positive_int(os.environ.get("TELEGRAM_OPERATOR_AGENT_TIMEOUT_SECONDS", ""), 900),
