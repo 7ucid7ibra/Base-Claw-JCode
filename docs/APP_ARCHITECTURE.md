@@ -7,7 +7,7 @@ app/
 ├── telegram_operator.py
 │   └── main Telegram operator entrypoint
 │
-├── operator/
+├── operator_core/
 │   ├── config.py
 │   ├── runtime.py
 │   ├── commands.py
@@ -52,6 +52,7 @@ app/
 - Keep changes behavior-preserving unless a Plane issue explicitly asks for behavior changes.
 - Move one boundary at a time, verify imports and install checks, then commit.
 - Prefer neutral names for shared BaseClaw modules. Codex-specific names should only remain in compatibility wrappers or Codex-specific implementation details.
+- Use `operator_core/` instead of `operator/` so the package does not shadow Python's standard `operator` module.
 - Keep compatibility wrappers until launch scripts, profiles, and external update paths are migrated.
 - Do not move UI and Telegram operator code in the same slice unless the shared boundary is small and verified.
 
@@ -61,5 +62,6 @@ app/
 - `app/harnesses/codex.py` and `app/codex_cli.py` are compatibility wrappers for older imports.
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
+- `app/operator_core/config.py` contains operator environment parsing, config loading, and startup summary helpers.
 - `app/speech/client.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
 - `tools/verify_install.py` and `tools/send_voice_note.py` are standalone utility scripts moved out of `app/`.

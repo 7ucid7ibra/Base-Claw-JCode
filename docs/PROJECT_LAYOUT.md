@@ -4,6 +4,8 @@ The root is kept small so a new user can find the installer, environment example
 
 ```text
 app/
+  operator_core/
+    config.py
   speech/
     server.py
     client.py
