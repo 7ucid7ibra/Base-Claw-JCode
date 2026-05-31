@@ -31,14 +31,22 @@ tools/
   verify_install.py
 scripts/
   install_windows.ps1
+  install_wizard.ps1
+  run_telegram_operator.ps1
+  speech_server.sh
   start_kokoro_server.ps1
   start_telegram_operator_ui.ps1
-  run_telegram_operator.ps1
 launchers/
   macos/
   windows/
 packaging/
+  macos/
+    build_app.sh
+    build_dmg.sh
+    install_launcher.sh
   windows/
+    baseclaw.iss
+    build_installer.ps1
 requirements/
   client.txt
   kokoro.txt

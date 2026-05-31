@@ -55,6 +55,28 @@ REMOVED_APP_MODULES = [
     APP_DIR / "harnesses" / "codex.py",
     APP_DIR / "telegram_codex_operator.py",
 ]
+EXPECTED_SCRIPT_FILES = [
+    PROJECT_ROOT / "scripts" / "install_windows.ps1",
+    PROJECT_ROOT / "scripts" / "install_wizard.ps1",
+    PROJECT_ROOT / "scripts" / "run_telegram_operator.ps1",
+    PROJECT_ROOT / "scripts" / "speech_server.sh",
+    PROJECT_ROOT / "scripts" / "start_kokoro_server.ps1",
+    PROJECT_ROOT / "scripts" / "start_telegram_operator_ui.ps1",
+]
+EXPECTED_PACKAGING_FILES = [
+    PROJECT_ROOT / "packaging" / "macos" / "build_app.sh",
+    PROJECT_ROOT / "packaging" / "macos" / "build_dmg.sh",
+    PROJECT_ROOT / "packaging" / "macos" / "install_launcher.sh",
+    PROJECT_ROOT / "packaging" / "windows" / "baseclaw.iss",
+    PROJECT_ROOT / "packaging" / "windows" / "build_installer.ps1",
+]
+REMOVED_SCRIPT_FILES = [
+    PROJECT_ROOT / "scripts" / "build_macos_app.sh",
+    PROJECT_ROOT / "scripts" / "build_macos_dmg.sh",
+    PROJECT_ROOT / "scripts" / "build_windows_installer.ps1",
+    PROJECT_ROOT / "scripts" / "install_macos_launcher.sh",
+    PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1",
+]
 
 
 def ok(message: str) -> None:
@@ -198,6 +220,18 @@ def check_refactor_boundaries() -> None:
     stale = [str(path.relative_to(BASE_DIR)) for path in REMOVED_APP_MODULES if path.exists()]
     if stale:
         fail("obsolete compatibility wrappers still exist: " + ", ".join(stale))
+
+    missing_scripts = [
+        str(path.relative_to(BASE_DIR))
+        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES]
+        if not path.exists()
+    ]
+    if missing_scripts:
+        fail("missing expected script or packaging files: " + ", ".join(missing_scripts))
+
+    stale_scripts = [str(path.relative_to(BASE_DIR)) for path in REMOVED_SCRIPT_FILES if path.exists()]
+    if stale_scripts:
+        fail("obsolete script wrappers or packaging scripts still exist: " + ", ".join(stale_scripts))
 
     telegram_operator = importlib.import_module("telegram_operator")
     command_handlers = importlib.import_module("operator_core.command_handlers")
