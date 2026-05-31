@@ -80,6 +80,10 @@ EXPECTED_LAUNCHER_FILES = [
     PROJECT_ROOT / "launchers" / "windows" / "start-kokoro.ps1",
     PROJECT_ROOT / "launchers" / "windows" / "start-ui.ps1",
 ]
+EXPECTED_TOOL_FILES = [
+    PROJECT_ROOT / "tools" / "send_voice_note.py",
+    PROJECT_ROOT / "tools" / "verify_install.py",
+]
 REMOVED_SCRIPT_FILES = [
     PROJECT_ROOT / "installer" / "baseclaw.iss",
     PROJECT_ROOT / "scripts" / "build_macos_app.sh",
@@ -234,7 +238,7 @@ def check_refactor_boundaries() -> None:
 
     missing_scripts = [
         str(path.relative_to(BASE_DIR))
-        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES, *EXPECTED_LAUNCHER_FILES]
+        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES, *EXPECTED_LAUNCHER_FILES, *EXPECTED_TOOL_FILES]
         if not path.exists()
     ]
     if missing_scripts:
