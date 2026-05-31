@@ -5,9 +5,10 @@ The root is kept small so a new user can find the installer, environment example
 ```text
 app/
   kokoro_server.py
-  kokoro_remote_telegram.py
   telegram_codex_operator.py
   telegram_operator_ui.py
+tools/
+  send_voice_note.py
   verify_install.py
 scripts/
   install_windows.ps1

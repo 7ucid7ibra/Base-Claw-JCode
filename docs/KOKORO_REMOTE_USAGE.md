@@ -162,7 +162,7 @@ curl.exe -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN/sendVoice" `
 Run this from a machine that can reach the Kokoro server:
 
 ```powershell
-python app\kokoro_remote_telegram.py `
+python tools\send_voice_note.py `
   --server-url http://192.168.1.25:8766 `
   --text "Hello from Kokoro" `
   --voice am_adam `

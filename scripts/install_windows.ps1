@@ -273,9 +273,9 @@ if ($installClient) {
 
 Write-Step "Verifying installation"
 if ($installClient) {
-    & ".\.venv-telegram-agent\Scripts\python.exe" app\verify_install.py --mode $Mode
+    & ".\.venv-telegram-agent\Scripts\python.exe" tools\verify_install.py --mode $Mode
 } elseif ($installHost) {
-    & ".\.venv-kokoro\Scripts\python.exe" app\verify_install.py --mode host
+    & ".\.venv-kokoro\Scripts\python.exe" tools\verify_install.py --mode host
 }
 
 Write-Step "Next steps"

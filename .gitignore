@@ -61,7 +61,10 @@ kokoro_german/
 # Local-only assets and experiments
 external/
 smoke/
-tools/
+tools/*
+!tools/
+!tools/verify_install.py
+!tools/send_voice_note.py
 models/
 profiles/
 overlays/private/

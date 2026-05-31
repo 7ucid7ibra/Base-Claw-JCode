@@ -8,13 +8,19 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from harnesses.cli import resolve_cli_command, resolve_codex_command
-
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
-PYTHON_FILES = sorted(path for path in (PROJECT_ROOT / "app").rglob("*.py"))
+sys.path.insert(0, str(PROJECT_ROOT / "app"))
+from harnesses.cli import resolve_cli_command, resolve_codex_command
+
+PYTHON_FILES = sorted(
+    [
+        *(PROJECT_ROOT / "app").rglob("*.py"),
+        *(PROJECT_ROOT / "tools").glob("*.py"),
+    ]
+)
 KOKORO_IMPORTS = [
     "fastapi",
     "faster_whisper",

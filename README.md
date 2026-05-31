@@ -238,10 +238,10 @@ Invoke-WebRequest `
 
 ## Remote Telegram Usage
 
-Use `app\kokoro_remote_telegram.py` from any machine that can reach the Kokoro server:
+Use `tools\send_voice_note.py` from any machine that can reach the Kokoro server:
 
 ```powershell
-python app\kokoro_remote_telegram.py `
+python tools\send_voice_note.py `
   --server-url http://LAN_IP:8766 `
   --text "Hello from Kokoro" `
   --voice am_adam `
