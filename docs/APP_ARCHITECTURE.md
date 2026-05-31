@@ -68,4 +68,5 @@ app/
 - `app/operator_core/updates.py` contains git source update helpers, code-mode git checkpoint helpers, and restart lifecycle helpers.
 - `app/speech/client.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
 - `app/speech/urls.py` contains shared speech URL normalization, local-host detection, Tailscale speech host discovery, and URL deduplication.
+- `app/ui/speech_panel.py` contains local speech install/start/stop/status helpers used by the desktop UI.
 - `tools/verify_install.py` and `tools/send_voice_note.py` are standalone utility scripts moved out of `app/`.
