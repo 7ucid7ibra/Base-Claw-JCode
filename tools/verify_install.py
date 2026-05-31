@@ -84,13 +84,30 @@ EXPECTED_TOOL_FILES = [
     PROJECT_ROOT / "tools" / "send_voice_note.py",
     PROJECT_ROOT / "tools" / "verify_install.py",
 ]
+EXPECTED_ROOT_FILES = [
+    PROJECT_ROOT / ".env.telegram-operator.example",
+    PROJECT_ROOT / ".gitignore",
+    PROJECT_ROOT / "CHANGELOG.md",
+    PROJECT_ROOT / "LICENSE",
+    PROJECT_ROOT / "README.md",
+    PROJECT_ROOT / "VERSION",
+    PROJECT_ROOT / "install.ps1",
+    PROJECT_ROOT / "install.sh",
+    PROJECT_ROOT / "start.sh",
+]
 REMOVED_SCRIPT_FILES = [
     PROJECT_ROOT / "installer" / "baseclaw.iss",
+    PROJECT_ROOT / "install-macos.command",
+    PROJECT_ROOT / "install-wizard.cmd",
+    PROJECT_ROOT / "run-operator.ps1",
     PROJECT_ROOT / "scripts" / "build_macos_app.sh",
     PROJECT_ROOT / "scripts" / "build_macos_dmg.sh",
     PROJECT_ROOT / "scripts" / "build_windows_installer.ps1",
     PROJECT_ROOT / "scripts" / "install_macos_launcher.sh",
     PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1",
+    PROJECT_ROOT / "start-kokoro.ps1",
+    PROJECT_ROOT / "start-macos.command",
+    PROJECT_ROOT / "start-ui.ps1",
 ]
 
 
@@ -238,7 +255,13 @@ def check_refactor_boundaries() -> None:
 
     missing_scripts = [
         str(path.relative_to(BASE_DIR))
-        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES, *EXPECTED_LAUNCHER_FILES, *EXPECTED_TOOL_FILES]
+        for path in [
+            *EXPECTED_ROOT_FILES,
+            *EXPECTED_SCRIPT_FILES,
+            *EXPECTED_PACKAGING_FILES,
+            *EXPECTED_LAUNCHER_FILES,
+            *EXPECTED_TOOL_FILES,
+        ]
         if not path.exists()
     ]
     if missing_scripts:
