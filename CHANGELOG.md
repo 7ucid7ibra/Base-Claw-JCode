@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.5 - 2026-05-31
+
+- Pointed the desktop Update button at GitHub `main` by default.
+- Added a migration for the old clean-core update branch URL.
+- Added non-main profile renaming in the desktop UI.
+- Strengthened profile deletion with typed profile-name confirmation.
+- Added verifier coverage for the GitHub-main update source.
+
 ## v0.1.4 - 2026-05-31
 
 - Finished the public repo cleanup after the app split.

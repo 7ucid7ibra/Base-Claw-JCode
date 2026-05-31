@@ -49,7 +49,7 @@ SPEECH_SCRIPT = PROJECT_ROOT / "scripts" / "speech_server.sh"
 LOG_PATH = PROJECT_ROOT / "telegram_operator.log"
 UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
 APP_VERSION_PATH = PROJECT_ROOT / "VERSION"
-DEFAULT_UPDATE_SOURCE_URL = ""
+DEFAULT_UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw/tree/main"
 
 
 def _unquote_config_value(value: str) -> str:
@@ -92,14 +92,21 @@ def _git_origin_update_source() -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _normalize_update_source(source: str) -> str:
+    if source.startswith("https://github.com/7ucid7ibra/Base-Claw/tree/clean-core-v0.1.3"):
+        return DEFAULT_UPDATE_SOURCE_URL
+    return source
+
+
 def configured_update_source_url() -> str:
-    return (
+    source = (
         os.environ.get("BASECLAW_UPDATE_SOURCE_URL", "").strip()
         or os.environ.get("BASECLAW_UPDATE_SOURCE", "").strip()
         or _install_config_value("BASECLAW_UPDATE_SOURCE_URL", "BASECLAW_UPDATE_SOURCE")
-        or _git_origin_update_source()
         or DEFAULT_UPDATE_SOURCE_URL
+        or _git_origin_update_source()
     )
+    return _normalize_update_source(source)
 
 
 UPDATE_SOURCE_URL = configured_update_source_url()
@@ -1110,6 +1117,14 @@ class OperatorUi(ctk.CTk):
             f"Delete profile '{profile}'?\n\nThis stops its operator and removes its local config, chat history, session state, workspace, and logs.",
         ):
             return
+        typed = simpledialog.askstring(
+            "Confirm delete",
+            f"Type {profile} to permanently delete this profile:",
+            parent=self,
+        )
+        if typed != profile:
+            messagebox.showinfo("Delete cancelled", "Profile name did not match. Nothing was deleted.")
+            return
         self._kill_operator_processes(show_errors=False)
         shutil.rmtree(target)
         self.profile_name = MAIN_PROFILE
@@ -1121,6 +1136,60 @@ class OperatorUi(ctk.CTk):
         self.refresh_status()
         self.refresh_chat_history()
         self.set_status("Profile deleted", f"Deleted profile: {profile}", None)
+
+    def rename_profile(self) -> None:
+        if self.chat_busy:
+            messagebox.showinfo("Agent busy", "Wait for the current desktop chat turn to finish before renaming a profile.")
+            return
+        old_profile = self.profile_name
+        if old_profile == MAIN_PROFILE:
+            messagebox.showinfo("Rename profile", "The main profile cannot be renamed.")
+            return
+        old_dir = profile_dir(old_profile)
+        if not old_dir.exists():
+            messagebox.showerror("Rename profile", f"Profile folder was not found: {old_profile}")
+            return
+        name = simpledialog.askstring("Rename profile", "New profile name:", initialvalue=old_profile, parent=self)
+        if not name:
+            return
+        new_profile = safe_profile_name(name)
+        if not new_profile:
+            messagebox.showerror("Rename profile", "Enter a usable profile name.")
+            return
+        if new_profile == MAIN_PROFILE:
+            messagebox.showerror("Rename profile", "The main profile already exists.")
+            return
+        if new_profile == old_profile:
+            return
+        new_dir = profile_dir(new_profile)
+        if new_dir.exists():
+            messagebox.showerror("Rename profile", f"Profile already exists: {new_profile}")
+            return
+        if not messagebox.askyesno(
+            "Rename profile",
+            f"Rename profile '{old_profile}' to '{new_profile}'?\n\n"
+            "This stops that profile's operator and moves its config, chat history, session state, workspace, and logs.",
+        ):
+            return
+        self.save(show_message=False)
+        self._kill_operator_processes(show_errors=False)
+        old_dir.rename(new_dir)
+        values = read_env(profile_env_path(new_profile))
+        values["TELEGRAM_OPERATOR_WORKDIR"] = str(profile_workdir(new_profile))
+        values["TELEGRAM_OPERATOR_STATE_PATH"] = str(profile_state_path(new_profile))
+        values["TELEGRAM_OPERATOR_MEMORY_LOG"] = str(profile_memory_log_path(new_profile))
+        values["TELEGRAM_OPERATOR_SQLITE_PATH"] = str(profile_sqlite_path(new_profile))
+        values["TELEGRAM_OPERATOR_LOG_PATH"] = str(profile_log_path(new_profile))
+        write_env(profile_env_path(new_profile), values)
+        self._refresh_profile_combo()
+        self.profile_name = new_profile
+        self.profile_var.set(new_profile)
+        self.values = self._profile_values(new_profile)
+        self._load_values_into_vars()
+        self.last_chat_row_id = -1
+        self.refresh_status()
+        self.refresh_chat_history()
+        self.set_status("Profile renamed", f"Renamed profile: {old_profile} -> {new_profile}", None)
 
     def on_profile_selected(self, value: str | None = None) -> None:
         if self.chat_busy:
@@ -1221,6 +1290,17 @@ class OperatorUi(ctk.CTk):
         ).grid(row=0, column=2, sticky="e")
         ctk.CTkButton(
             profile_bar,
+            text="Rename",
+            width=84,
+            height=34,
+            corner_radius=12,
+            fg_color=COLORS["panel_lift"],
+            hover_color=COLORS["border"],
+            text_color=COLORS["text"],
+            command=self.rename_profile,
+        ).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        ctk.CTkButton(
+            profile_bar,
             text="Delete",
             width=84,
             height=34,
@@ -1229,7 +1309,7 @@ class OperatorUi(ctk.CTk):
             hover_color=COLORS["border"],
             text_color=COLORS["text"],
             command=self.delete_profile,
-        ).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(8, 0))
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 16))

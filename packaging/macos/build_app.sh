@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 APP_DIR="${1:-$ROOT_DIR/dist/BaseClaw.app}"
-APP_VERSION="${BASECLAW_APP_VERSION:-0.1.4}"
+APP_VERSION="${BASECLAW_APP_VERSION:-0.1.5}"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 
 mkdir -p "$MACOS_DIR"

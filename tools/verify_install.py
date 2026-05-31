@@ -295,6 +295,12 @@ def check_refactor_boundaries() -> None:
     if stale_references:
         fail("obsolete script references still exist: " + ", ".join(stale_references))
 
+    ui_text = (APP_DIR / "telegram_operator_ui.py").read_text(encoding="utf-8")
+    if 'DEFAULT_UPDATE_SOURCE_URL = "https://github.com/7ucid7ibra/Base-Claw/tree/main"' not in ui_text:
+        fail("desktop UI default update source no longer points to GitHub main")
+    if "tree/clean-core-v0.1.3" not in ui_text:
+        fail("desktop UI no longer normalizes the legacy clean-core update source")
+
     telegram_operator = importlib.import_module("telegram_operator")
     command_handlers = importlib.import_module("operator_core.command_handlers")
     media_handlers = importlib.import_module("operator_core.media_handlers")

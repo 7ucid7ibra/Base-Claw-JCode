@@ -34,9 +34,9 @@ if (-not (Test-Path $issPath)) {
 if ([string]::IsNullOrWhiteSpace($Version)) {
     try {
         $commit = (& git -C $projectRoot rev-parse --short HEAD 2>$null).Trim()
-        $Version = "0.1.4-alpha+$commit"
+        $Version = "0.1.5-alpha+$commit"
     } catch {
-        $Version = "0.1.4-alpha"
+        $Version = "0.1.5-alpha"
     }
 }
 
