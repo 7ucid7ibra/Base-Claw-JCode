@@ -23,6 +23,19 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 from harnesses.bridges import CodexBridge, build_agent_bridge
+from operator_core.commands import (
+    attachments_help_text,
+    commands_help_text,
+    help_menu_keyboard,
+    help_menu_text,
+    manual_update_keyboard,
+    read_help_text,
+    reset_confirmation_keyboard,
+    status_text,
+    voice_menu_markup,
+    voice_status_text,
+    workspace_help_text,
+)
 from operator_core.config import (
     OPERATOR_ENV_PATH,
     OperatorConfig,
@@ -1246,20 +1259,12 @@ class TelegramOperator:
         await self._send_reset_confirmation(context, chat_id)
 
     async def _send_reset_confirmation(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Yes, reset session", callback_data="reset:confirm"),
-                    InlineKeyboardButton("Cancel", callback_data="reset:cancel"),
-                ]
-            ]
-        )
         await self._send_text_message(
             context,
             chat_id,
             "Reset clears this chat's persisted sessions for all harnesses. Are you sure?",
             event_type="command_reset_confirm",
-            reply_markup=keyboard,
+            reply_markup=reset_confirmation_keyboard(),
         )
 
     def _status_text(self, chat_id: int) -> str:
@@ -1268,24 +1273,7 @@ class TelegramOperator:
             codex_status = f"available at {codex_executable()}"
         except RuntimeError as exc:
             codex_status = str(exc)
-        return (
-            f"Provider: {self.config.agent_provider}\n"
-            f"Model provider: {self.config.jcode_provider_id or 'n/a'}\n"
-            f"Model/base URL: {self.config.codex_model or 'default'} / {self.config.jcode_base_url or 'provider default'}\n"
-            f"Workdir: {self.config.workdir}\n"
-            f"Session: {session_id or 'none'}\n"
-            f"Access scope: {self.config.access_scope}\n"
-            f"Action mode: {self.config.action_mode}\n"
-            f"Shared context: {'on' if self.config.shared_context_enabled else 'off'}\n"
-            f"Allowed paths: {', '.join(str(path) for path in self.config.allowed_paths) or 'none'}\n"
-            f"Legacy safety mode: {self.config.safety_mode}\n"
-            f"Codex: {codex_status}\n"
-            f"Voice: {self.config.kokoro_voice}\n"
-            f"Whisper model: {self.config.whisper_model_name}\n"
-            f"Speech hosts: {', '.join(self.config.whisper_urls) or 'none'}\n"
-            f"Voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
-            f"Local speech fallback: {self.config.local_speech_fallback}"
-        )
+        return status_text(self.config, session_id=session_id, codex_status=codex_status)
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id
@@ -1316,106 +1304,29 @@ class TelegramOperator:
         await self._send_help_menu(context, chat_id)
 
     async def _send_help_menu(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Status", callback_data="menu:status"),
-                    InlineKeyboardButton("Commands", callback_data="menu:commands"),
-                ],
-                [
-                    InlineKeyboardButton("Voice picker", callback_data="menu:voice"),
-                    InlineKeyboardButton("Voice on", callback_data="menu:voice_on"),
-                    InlineKeyboardButton("Voice off", callback_data="menu:voice_off"),
-                ],
-                [
-                    InlineKeyboardButton("Read help", callback_data="menu:read"),
-                    InlineKeyboardButton("Attachments", callback_data="menu:attachments"),
-                ],
-                [
-                    InlineKeyboardButton("Update", callback_data="menu:update"),
-                    InlineKeyboardButton("Restart", callback_data="menu:restart"),
-                ],
-                [
-                    InlineKeyboardButton("Reset session", callback_data="menu:reset"),
-                    InlineKeyboardButton("Workspace", callback_data="menu:workspace"),
-                ],
-            ]
+        await self._send_text_message(
+            context,
+            chat_id,
+            help_menu_text(),
+            event_type="command_help_reply",
+            reply_markup=help_menu_keyboard(),
         )
-        text = (
-            "BaseClaw command center.\n\n"
-            "Use the buttons for common controls, or send a command directly.\n\n"
-            "Most used commands:\n"
-            "/status - show current setup\n"
-            "/read - make a voice note from my last reply\n"
-            "/read next - read only my next reply\n"
-            "/voice_on and /voice_off - control automatic voice replies\n"
-            "/update - pull the configured source update\n"
-            "/restart - restart the Telegram operator\n"
-            "/reset - clear this chat's agent session"
-        )
-        await self._send_text_message(context, chat_id, text, event_type="command_help_reply", reply_markup=keyboard)
 
     def _voice_status_text(self) -> str:
-        return (
-            f"Automatic voice replies: {'on' if self.config.voice_replies_enabled else 'off'}\n"
-            f"Current voice: {self.config.kokoro_voice}\n\n"
-            "/voice opens the voice picker.\n"
-            "/voice_on enables automatic voice replies.\n"
-            "/voice_off keeps replies as text unless you use /read."
-        )
+        return voice_status_text(self.config)
 
     def _read_help_text(self) -> str:
-        return (
-            "Read commands:\n\n"
-            "/read\n"
-            "Creates a voice note from my latest assistant reply.\n\n"
-            "Reply to a message with /read\n"
-            "Creates a voice note from that replied-to message.\n\n"
-            "/read next\n"
-            "Reads only my next reply as a voice note, then goes back to normal text replies.\n\n"
-            "This works even when automatic voice replies are off."
-        )
+        return read_help_text()
 
     def _commands_help_text(self) -> str:
-        return (
-            "Built-in commands:\n\n"
-            "/start - show startup/status summary\n"
-            "/help - open this command center\n"
-            "/status - show provider, model, paths, session, voice, and safety settings\n"
-            "/reset - clear this chat's persisted agent session after confirmation\n"
-            "/voice - choose a Kokoro voice\n"
-            "/voice_status - show current voice settings\n"
-            "/voice_on - enable automatic voice replies\n"
-            "/voice_off - disable automatic voice replies\n"
-            "/read - create a voice note from a previous or next reply\n"
-            "/update - pull the configured BaseClaw source update after confirmation\n"
-            "/restart - restart the Telegram operator\n"
-            "/restart_operator - same as /restart"
-        )
+        return commands_help_text()
 
     def _attachments_help_text(self) -> str:
-        return (
-            "Attachments:\n\n"
-            "You can send text, voice notes, photos, PDFs, documents, and videos.\n\n"
-            "Voice notes are transcribed before they are passed into the agent.\n"
-            "Images and files are saved locally and included as context.\n"
-            "Replying to an older message gives me that message as context.\n\n"
-            "For file delivery back to you, I create the file locally and hand it to the Telegram bridge."
-        )
+        return attachments_help_text()
 
     def _workspace_help_text(self, chat_id: int) -> str:
         session_id = self.state.get_session_id(chat_id, self.config.agent_provider)
-        allowed_paths = ", ".join(str(path) for path in self.config.allowed_paths) or "none"
-        return (
-            "Workspace and safety:\n\n"
-            f"Workdir: {self.config.workdir}\n"
-            f"Session: {session_id or 'none'}\n"
-            f"Access scope: {self.config.access_scope}\n"
-            f"Action mode: {self.config.action_mode}\n"
-            f"Legacy safety mode: {self.config.safety_mode}\n"
-            f"Allowed paths: {allowed_paths}\n\n"
-            "Local skills, automations, scratch work, uploads, and artifacts belong in the agent workspace, not in public BaseClaw core."
-        )
+        return workspace_help_text(self.config, session_id=session_id, allowed_paths=self.config.allowed_paths)
 
     def _available_voices(self) -> list[str]:
         voices: list[str] = []
@@ -1463,18 +1374,10 @@ class TelegramOperator:
                 event_type="command_voice_no_voices",
             )
             return
-        buttons = [
-            InlineKeyboardButton(
-                f"{'✓ ' if voice == self.config.kokoro_voice else ''}{voice}",
-                callback_data=f"voice:set:{voice}",
-            )
-            for voice in voices[:48]
-        ]
-        rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Current voice: {self.config.kokoro_voice}\nChoose a Kokoro voice:",
-            reply_markup=InlineKeyboardMarkup(rows),
+            reply_markup=voice_menu_markup(voices, self.config.kokoro_voice),
         )
 
     async def on_voice_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1658,20 +1561,12 @@ class TelegramOperator:
         requested_ref = " ".join(context.args).strip() if context.args else ""
         ref = self._manual_update_ref(requested_ref)
         self.pending_manual_updates[chat_id] = ref
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
-                    InlineKeyboardButton("Cancel", callback_data="update:cancel"),
-                ]
-            ]
-        )
         await self._send_text_message(
             context,
             chat_id,
             self._manual_update_summary(ref),
             event_type="command_update_confirm",
-            reply_markup=keyboard,
+            reply_markup=manual_update_keyboard(),
         )
 
     def _spawn_replacement_operator(self) -> subprocess.Popen:
@@ -2613,20 +2508,12 @@ class TelegramOperator:
         if action == "update":
             ref = self._manual_update_ref()
             self.pending_manual_updates[chat_id] = ref
-            keyboard = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton("Yes, update", callback_data="update:confirm"),
-                        InlineKeyboardButton("Cancel", callback_data="update:cancel"),
-                    ]
-                ]
-            )
             await self._send_text_message(
                 context,
                 chat_id,
                 self._manual_update_summary(ref),
                 event_type="menu_update_confirm",
-                reply_markup=keyboard,
+                reply_markup=manual_update_keyboard(),
             )
             return
         if action == "restart":
