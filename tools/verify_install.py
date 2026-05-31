@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import shutil
 import subprocess
 import sys
@@ -9,9 +10,10 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
-APP_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = APP_DIR.parent
+TOOLS_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = TOOLS_DIR.parent
 BASE_DIR = PROJECT_ROOT
+APP_DIR = PROJECT_ROOT / "app"
 sys.path.insert(0, str(PROJECT_ROOT / "app"))
 from harnesses.cli import resolve_cli_command, resolve_codex_command
 
@@ -35,6 +37,23 @@ TELEGRAM_IMPORTS = [
     "dotenv",
     "requests",
     "telegram",
+]
+EXPECTED_APP_MODULES = [
+    APP_DIR / "harnesses" / "cli.py",
+    APP_DIR / "harnesses" / "bridges.py",
+    APP_DIR / "harnesses" / "desktop.py",
+    APP_DIR / "operator_core" / "command_handlers.py",
+    APP_DIR / "operator_core" / "media_handlers.py",
+    APP_DIR / "operator_core" / "updates.py",
+    APP_DIR / "speech" / "urls.py",
+    APP_DIR / "ui" / "speech_panel.py",
+    APP_DIR / "telegram_operator.py",
+    APP_DIR / "telegram_operator_ui.py",
+]
+REMOVED_APP_MODULES = [
+    APP_DIR / "codex_cli.py",
+    APP_DIR / "harnesses" / "codex.py",
+    APP_DIR / "telegram_codex_operator.py",
 ]
 
 
@@ -171,12 +190,63 @@ def check_kokoro_health() -> None:
         warn("Kokoro server is not running on http://127.0.0.1:8766")
 
 
+def check_refactor_boundaries() -> None:
+    missing = [str(path.relative_to(BASE_DIR)) for path in EXPECTED_APP_MODULES if not path.exists()]
+    if missing:
+        fail("missing expected app modules: " + ", ".join(missing))
+
+    stale = [str(path.relative_to(BASE_DIR)) for path in REMOVED_APP_MODULES if path.exists()]
+    if stale:
+        fail("obsolete compatibility wrappers still exist: " + ", ".join(stale))
+
+    telegram_operator = importlib.import_module("telegram_operator")
+    command_handlers = importlib.import_module("operator_core.command_handlers")
+    media_handlers = importlib.import_module("operator_core.media_handlers")
+    updates = importlib.import_module("operator_core.updates")
+
+    if not issubclass(command_handlers.CommandHandlersMixin, updates.UpdateLifecycleMixin):
+        fail("CommandHandlersMixin no longer inherits UpdateLifecycleMixin")
+    if not issubclass(telegram_operator.TelegramOperator, command_handlers.CommandHandlersMixin):
+        fail("TelegramOperator no longer inherits CommandHandlersMixin")
+    if not issubclass(telegram_operator.TelegramOperator, media_handlers.MediaHandlersMixin):
+        fail("TelegramOperator no longer inherits MediaHandlersMixin")
+
+    required_methods = [
+        "start",
+        "help_command",
+        "read_command",
+        "restart_operator",
+        "on_manual_update_callback",
+        "on_document",
+        "on_photo",
+        "on_video",
+        "_manual_update_summary",
+    ]
+    missing_methods = [name for name in required_methods if not hasattr(telegram_operator.TelegramOperator, name)]
+    if missing_methods:
+        fail("TelegramOperator is missing refactored methods: " + ", ".join(missing_methods))
+
+    speech = importlib.import_module("speech")
+    speech_urls = importlib.import_module("speech.urls")
+    if speech.normalize_speech_url("127.0.0.1") != "http://127.0.0.1:8766":
+        fail("speech URL normalization changed unexpectedly")
+    if speech_urls.unique_urls(["localhost", "http://localhost:8766"]) != ["http://localhost:8766"]:
+        fail("speech URL deduplication changed unexpectedly")
+
+    ui_speech = importlib.import_module("ui.speech_panel")
+    if not ui_speech.local_speech_urls() or ui_speech.local_speech_urls()[0] != "http://127.0.0.1:8766":
+        fail("UI speech helper local URL default changed unexpectedly")
+
+    ok("refactor boundaries are intact")
+
+
 def main() -> None:
     args = parse_args()
     if sys.version_info < (3, 11):
         fail("Python 3.11 or newer is required")
     ok(f"Python {sys.version.split()[0]}")
     compile_python_files()
+    check_refactor_boundaries()
     if args.mode in {"full", "host"}:
         check_imports("Kokoro env", venv_python(".venv-kokoro"), KOKORO_IMPORTS)
         check_host_commands()
