@@ -15,6 +15,7 @@ app/
 │   ├── command_handlers.py
 │   ├── callbacks.py
 │   ├── attachments.py
+│   ├── media_handlers.py
 │   └── updates.py
 │
 ├── harnesses/
@@ -58,6 +59,7 @@ app/
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
 - `app/operator_core/attachments.py` contains attachment filename/type helpers and PDF/text extraction helpers.
+- `app/operator_core/media_handlers.py` contains Telegram document, photo, album, and video intake handlers.
 - `app/operator_core/commands.py` contains Telegram command text and keyboard builders.
 - `app/operator_core/command_handlers.py` contains Telegram command and menu callback handlers that still depend on operator runtime state.
 - `app/operator_core/config.py` contains operator environment parsing, config loading, and startup summary helpers.

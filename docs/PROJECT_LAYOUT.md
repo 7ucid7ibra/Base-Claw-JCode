@@ -9,6 +9,7 @@ app/
     command_handlers.py
     commands.py
     config.py
+    media_handlers.py
     storage.py
     updates.py
   speech/
