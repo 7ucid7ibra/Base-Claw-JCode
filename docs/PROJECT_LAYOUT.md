@@ -38,7 +38,13 @@ scripts/
   start_telegram_operator_ui.ps1
 launchers/
   macos/
+    install-macos.command
+    start-macos.command
   windows/
+    install-wizard.cmd
+    run-operator.ps1
+    start-kokoro.ps1
+    start-ui.ps1
 packaging/
   macos/
     build_app.sh

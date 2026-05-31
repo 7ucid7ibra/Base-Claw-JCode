@@ -70,6 +70,14 @@ EXPECTED_PACKAGING_FILES = [
     PROJECT_ROOT / "packaging" / "windows" / "baseclaw.iss",
     PROJECT_ROOT / "packaging" / "windows" / "build_installer.ps1",
 ]
+EXPECTED_LAUNCHER_FILES = [
+    PROJECT_ROOT / "launchers" / "macos" / "install-macos.command",
+    PROJECT_ROOT / "launchers" / "macos" / "start-macos.command",
+    PROJECT_ROOT / "launchers" / "windows" / "install-wizard.cmd",
+    PROJECT_ROOT / "launchers" / "windows" / "run-operator.ps1",
+    PROJECT_ROOT / "launchers" / "windows" / "start-kokoro.ps1",
+    PROJECT_ROOT / "launchers" / "windows" / "start-ui.ps1",
+]
 REMOVED_SCRIPT_FILES = [
     PROJECT_ROOT / "scripts" / "build_macos_app.sh",
     PROJECT_ROOT / "scripts" / "build_macos_dmg.sh",
@@ -223,7 +231,7 @@ def check_refactor_boundaries() -> None:
 
     missing_scripts = [
         str(path.relative_to(BASE_DIR))
-        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES]
+        for path in [*EXPECTED_SCRIPT_FILES, *EXPECTED_PACKAGING_FILES, *EXPECTED_LAUNCHER_FILES]
         if not path.exists()
     ]
     if missing_scripts:
