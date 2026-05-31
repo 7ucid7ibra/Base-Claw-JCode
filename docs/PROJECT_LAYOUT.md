@@ -5,6 +5,7 @@ The root is kept small so a new user can find the installer, environment example
 ```text
 app/
   operator_core/
+    attachments.py
     commands.py
     config.py
     storage.py

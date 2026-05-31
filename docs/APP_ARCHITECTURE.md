@@ -62,6 +62,7 @@ app/
 - `app/harnesses/codex.py` and `app/codex_cli.py` are compatibility wrappers for older imports.
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
+- `app/operator_core/attachments.py` contains attachment filename/type helpers and PDF/text extraction helpers.
 - `app/operator_core/commands.py` contains Telegram command text and keyboard builders.
 - `app/operator_core/config.py` contains operator environment parsing, config loading, and startup summary helpers.
 - `app/operator_core/storage.py` contains operator state, memory log, SQLite message history, and continuity summary storage.
