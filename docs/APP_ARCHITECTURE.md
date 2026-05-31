@@ -41,25 +41,19 @@ app/
 ├── tools/
 │   ├── verify_install.py
 │   └── send_voice_note.py
-│
-└── compat/
-    ├── telegram_codex_operator.py
-    └── codex_cli.py
 ```
 
 ## Refactor Rules
 
 - Keep changes behavior-preserving unless a Plane issue explicitly asks for behavior changes.
 - Move one boundary at a time, verify imports and install checks, then commit.
-- Prefer neutral names for shared BaseClaw modules. Codex-specific names should only remain in compatibility wrappers or Codex-specific implementation details.
+- Prefer neutral names for shared BaseClaw modules. Codex-specific names should only remain in Codex-specific implementation details.
 - Use `operator_core/` instead of `operator/` so the package does not shadow Python's standard `operator` module.
-- Keep compatibility wrappers until launch scripts, profiles, and external update paths are migrated.
 - Do not move UI and Telegram operator code in the same slice unless the shared boundary is small and verified.
 
 ## Current Transitional State
 
 - `app/harnesses/cli.py` is the generic CLI resolver.
-- `app/harnesses/codex.py` and `app/codex_cli.py` are compatibility wrappers for older imports.
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
 - `app/operator_core/attachments.py` contains attachment filename/type helpers and PDF/text extraction helpers.
