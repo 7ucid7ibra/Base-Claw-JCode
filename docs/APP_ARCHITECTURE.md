@@ -12,6 +12,7 @@ app/
 │   ├── storage.py
 │   ├── runtime.py
 │   ├── commands.py
+│   ├── command_handlers.py
 │   ├── callbacks.py
 │   ├── attachments.py
 │   └── updates.py
@@ -58,6 +59,7 @@ app/
 - `app/harnesses/desktop.py` contains desktop chat command construction.
 - `app/operator_core/attachments.py` contains attachment filename/type helpers and PDF/text extraction helpers.
 - `app/operator_core/commands.py` contains Telegram command text and keyboard builders.
+- `app/operator_core/command_handlers.py` contains Telegram command and menu callback handlers that still depend on operator runtime state.
 - `app/operator_core/config.py` contains operator environment parsing, config loading, and startup summary helpers.
 - `app/operator_core/storage.py` contains operator state, memory log, SQLite message history, and continuity summary storage.
 - `app/speech/client.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
