@@ -9,6 +9,7 @@ app/
 │
 ├── operator_core/
 │   ├── config.py
+│   ├── storage.py
 │   ├── runtime.py
 │   ├── commands.py
 │   ├── callbacks.py
@@ -63,5 +64,6 @@ app/
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
 - `app/operator_core/config.py` contains operator environment parsing, config loading, and startup summary helpers.
+- `app/operator_core/storage.py` contains operator state, memory log, SQLite message history, and continuity summary storage.
 - `app/speech/client.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
 - `tools/verify_install.py` and `tools/send_voice_note.py` are standalone utility scripts moved out of `app/`.
