@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from harnesses.cli import resolve_codex_command
-from process_utils import agent_subprocess_env, hidden_subprocess_kwargs, terminate_process_tree
+from process_utils import (
+    agent_subprocess_env,
+    agent_subprocess_kwargs,
+    hidden_subprocess_kwargs,
+    terminate_process_tree,
+)
 
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parent
