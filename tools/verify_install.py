@@ -109,6 +109,13 @@ REMOVED_SCRIPT_FILES = [
     PROJECT_ROOT / "start-macos.command",
     PROJECT_ROOT / "start-ui.ps1",
 ]
+REMOVED_TEXT_REFERENCES = [
+    "scripts/install_macos_launcher.sh",
+    "scripts/build_macos_app.sh",
+    "scripts/build_macos_dmg.sh",
+    "scripts/build_windows_installer.ps1",
+    "scripts/run_telegram_codex_operator.ps1",
+]
 
 
 def ok(message: str) -> None:
@@ -270,6 +277,23 @@ def check_refactor_boundaries() -> None:
     stale_scripts = [str(path.relative_to(BASE_DIR)) for path in REMOVED_SCRIPT_FILES if path.exists()]
     if stale_scripts:
         fail("obsolete script wrappers or packaging scripts still exist: " + ", ".join(stale_scripts))
+
+    searched_files = [
+        PROJECT_ROOT / "README.md",
+        PROJECT_ROOT / "install.sh",
+        PROJECT_ROOT / "install.ps1",
+        *(PROJECT_ROOT / "docs").glob("*.md"),
+    ]
+    stale_references: list[str] = []
+    for path in searched_files:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        for reference in REMOVED_TEXT_REFERENCES:
+            if reference in text:
+                stale_references.append(f"{path.relative_to(BASE_DIR)}: {reference}")
+    if stale_references:
+        fail("obsolete script references still exist: " + ", ".join(stale_references))
 
     telegram_operator = importlib.import_module("telegram_operator")
     command_handlers = importlib.import_module("operator_core.command_handlers")

@@ -371,8 +371,8 @@ install_macos_launcher() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return
   fi
-  if [[ -x "scripts/install_macos_launcher.sh" ]]; then
-    "scripts/install_macos_launcher.sh" || say "Could not create the macOS launcher. You can still start BaseClaw with ./start.sh."
+  if [[ -x "packaging/macos/install_launcher.sh" ]]; then
+    "packaging/macos/install_launcher.sh" || say "Could not create the macOS launcher. You can still start BaseClaw with ./start.sh."
   fi
 }
 

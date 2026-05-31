@@ -1,6 +1,6 @@
 #define AppVersion GetEnv("BASECLAW_INSTALLER_VERSION")
 #if AppVersion == ""
-#define AppVersion "0.1.0-alpha"
+#define AppVersion "0.1.4-alpha"
 #endif
 
 #define SourceDir "..\..\dist\windows-installer-stage"

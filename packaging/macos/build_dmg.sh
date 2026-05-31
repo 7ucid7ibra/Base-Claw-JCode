@@ -12,9 +12,9 @@ fi
 VERSION="${BASECLAW_DMG_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
   if command -v git >/dev/null 2>&1 && git rev-parse --short HEAD >/dev/null 2>&1; then
-    VERSION="0.1.0-alpha+$(git rev-parse --short HEAD)"
+    VERSION="0.1.4-alpha+$(git rev-parse --short HEAD)"
   else
-    VERSION="0.1.0-alpha"
+    VERSION="0.1.4-alpha"
   fi
 fi
 
