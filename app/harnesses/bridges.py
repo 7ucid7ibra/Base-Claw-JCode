@@ -17,7 +17,7 @@ from process_utils import agent_subprocess_env, hidden_subprocess_kwargs, termin
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parent
 CODEX_FINAL_MESSAGE_GRACE_SECONDS = 8.0
-LOGGER = logging.getLogger("telegram_codex_operator")
+LOGGER = logging.getLogger("telegram_operator")
 
 
 def friendly_codex_error(detail: str, exit_code: int) -> str:

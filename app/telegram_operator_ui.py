@@ -34,10 +34,10 @@ WORKSPACE_SUBDIRS = ("skills", "automations", "projects", "slash_commands", "not
 ENV_PATH = PROJECT_ROOT / ".env.telegram-operator"
 PROFILES_DIR = PROJECT_ROOT / "profiles"
 MAIN_PROFILE = "main"
-OPERATOR_SCRIPT = APP_DIR / "telegram_codex_operator.py"
-SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_codex_operator.ps1"
+OPERATOR_SCRIPT = APP_DIR / "telegram_operator.py"
+SUPERVISOR_SCRIPT = PROJECT_ROOT / "scripts" / "run_telegram_operator.ps1"
 SPEECH_SCRIPT = PROJECT_ROOT / "scripts" / "speech_server.sh"
-LOG_PATH = PROJECT_ROOT / "telegram_codex_operator.log"
+LOG_PATH = PROJECT_ROOT / "telegram_operator.log"
 UPDATE_VERSION_PATH = PROJECT_ROOT / ".baseclaw-version.json"
 APP_VERSION_PATH = PROJECT_ROOT / "VERSION"
 DEFAULT_UPDATE_SOURCE_URL = ""
@@ -167,7 +167,7 @@ DEFAULTS = {
     "TELEGRAM_OPERATOR_STATE_PATH": str(BASE_DIR / "telegram_operator_state.json"),
     "TELEGRAM_OPERATOR_MEMORY_LOG": str(BASE_DIR / "telegram_operator_memory.jsonl"),
     "TELEGRAM_OPERATOR_SQLITE_PATH": str(BASE_DIR / "telegram_operator_messages.sqlite3"),
-    "TELEGRAM_OPERATOR_LOG_PATH": str(BASE_DIR / "telegram_codex_operator.log"),
+    "TELEGRAM_OPERATOR_LOG_PATH": str(BASE_DIR / "telegram_operator.log"),
     "TELEGRAM_OPERATOR_REMOTE_HOST": "127.0.0.1",
     "TELEGRAM_OPERATOR_SPEECH_PORT": "8766",
     "TELEGRAM_OPERATOR_LLM_PORT": "1234",
@@ -1030,7 +1030,7 @@ def profile_env_path(profile: str) -> Path:
 def profile_log_path(profile: str) -> Path:
     if profile == MAIN_PROFILE:
         return LOG_PATH
-    return profile_dir(profile) / "telegram_codex_operator.log"
+    return profile_dir(profile) / "telegram_operator.log"
 
 
 def profile_state_path(profile: str) -> Path:
@@ -3692,7 +3692,7 @@ class OperatorUi(ctk.CTk):
             "agent_workspace",
             "profiles",
             "telegram_uploads",
-            "telegram_codex_operator.log",
+            "telegram_operator.log",
             "telegram_operator_messages.sqlite3",
             "telegram_operator_memory.jsonl",
             "telegram_operator_state.json",

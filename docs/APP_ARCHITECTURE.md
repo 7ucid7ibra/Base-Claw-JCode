@@ -14,7 +14,6 @@ app/
 │   ├── commands.py
 │   ├── callbacks.py
 │   ├── attachments.py
-│   ├── storage.py
 │   └── updates.py
 │
 ├── harnesses/

@@ -10,7 +10,7 @@ This project is ready to share as an alpha learning foundation after the local-s
 - Review `git status --short` and make sure only project files are present.
 - Remove generated files before release: logs, SQLite databases, voice test WAVs, screenshots, caches, virtual environments, and downloaded model folders.
 - Run `bash -n install.sh`.
-- Run `python -m py_compile app/telegram_operator_ui.py app/telegram_codex_operator.py app/speech/server.py`.
+- Run `python -m py_compile app/telegram_operator_ui.py app/telegram_operator.py app/speech/server.py`.
 - Start Kokoro and confirm `GET /health`, `GET /voices`, and a real `POST /synthesize`.
 - Confirm `POST /synthesize_voice_note` if you want lightweight clients to avoid local ffmpeg.
 - Start the Telegram operator in `restricted` or `safe` mode first.

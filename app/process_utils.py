@@ -8,7 +8,7 @@ import sys
 from typing import Any
 
 
-LOGGER = logging.getLogger("telegram_codex_operator")
+LOGGER = logging.getLogger("telegram_operator")
 
 
 def hidden_subprocess_kwargs() -> dict:

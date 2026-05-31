@@ -1,3 +1,3 @@
 $ErrorActionPreference = "Stop"
 
-& "$PSScriptRoot\scripts\run_telegram_codex_operator.ps1"
+& "$PSScriptRoot\scripts\run_telegram_operator.ps1"

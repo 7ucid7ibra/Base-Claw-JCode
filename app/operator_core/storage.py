@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from speech import readable_message_text
 
-LOGGER = logging.getLogger("telegram_codex_operator")
+LOGGER = logging.getLogger("telegram_operator")
 
 
 def utc_now() -> str:

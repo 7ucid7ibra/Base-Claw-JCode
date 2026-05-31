@@ -11,7 +11,7 @@ app/
     server.py
     client.py
     whisper_worker.py
-  telegram_codex_operator.py
+  telegram_operator.py
   telegram_operator_ui.py
 tools/
   send_voice_note.py
@@ -20,7 +20,7 @@ scripts/
   install_windows.ps1
   start_kokoro_server.ps1
   start_telegram_operator_ui.ps1
-  run_telegram_codex_operator.ps1
+  run_telegram_operator.ps1
 launchers/
   macos/
   windows/
@@ -33,7 +33,7 @@ requirements/
 docs/
   INSTALLATION_MODES.md
   KOKORO_REMOTE_USAGE.md
-  TELEGRAM_CODEX_OPERATOR.md
+  TELEGRAM_OPERATOR.md
   TROUBLESHOOTING.md
   PUBLISHING.md
 overlays/

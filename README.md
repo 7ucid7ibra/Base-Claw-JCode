@@ -275,14 +275,14 @@ BaseClaw includes a Telegram-controlled coding-agent operator bridge:
 
 Files:
 
-- `app/telegram_codex_operator.py`
+- `app/telegram_operator.py`
 - `app/telegram_operator_ui.py`
 - `scripts/start_kokoro_server.ps1`
 - `scripts/start_telegram_operator_ui.ps1`
-- `scripts/run_telegram_codex_operator.ps1`
+- `scripts/run_telegram_operator.ps1`
 - `requirements/telegram-operator.txt`
 - `.env.telegram-operator.example`
-- `docs/TELEGRAM_CODEX_OPERATOR.md`
+- `docs/TELEGRAM_OPERATOR.md`
 
 Create its environment:
 
@@ -302,7 +302,7 @@ Run it:
 
 ```powershell
 .\.venv-telegram-agent\Scripts\Activate.ps1
-python app\telegram_codex_operator.py
+python app\telegram_operator.py
 ```
 
 You can also run `.\launchers\windows\run-operator.ps1` to keep the operator restarting after crashes.
@@ -338,7 +338,7 @@ If no workspace home is selected, the UI uses `agent_workspace` inside the proje
 
 That workspace starts with local-only folders for `skills`, `automations`, `projects`, `slash_commands`, `notes`, `scratch`, `artifacts`, and `uploads`. Git only tracks the starter note at `agent_workspace/AGENT_HOME.md`; the rest is private runtime work.
 
-Read `docs/TELEGRAM_CODEX_OPERATOR.md` before using it. This bridge is intentionally high trust.
+Read `docs/TELEGRAM_OPERATOR.md` before using it. This bridge is intentionally high trust.
 
 ## Provider Requirements
 
@@ -353,7 +353,7 @@ Basic checks:
 
 ```bash
 bash -n install.sh
-python -m py_compile app/telegram_operator_ui.py app/telegram_codex_operator.py app/speech/server.py
+python -m py_compile app/telegram_operator_ui.py app/telegram_operator.py app/speech/server.py
 ```
 
 Also start Kokoro and confirm `/health`, `/voices`, and a real synthesis call before publishing a voice-enabled release.

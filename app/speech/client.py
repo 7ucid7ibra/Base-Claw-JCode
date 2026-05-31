@@ -13,7 +13,7 @@ import requests
 
 from process_utils import hidden_subprocess_kwargs
 
-LOGGER = logging.getLogger("telegram_codex_operator")
+LOGGER = logging.getLogger("telegram_operator")
 SPEECH_CONNECT_TIMEOUT_SECONDS = 4
 SPEECH_READ_TIMEOUT_SECONDS = 300
 SPEECH_REQUEST_TIMEOUT = (SPEECH_CONNECT_TIMEOUT_SECONDS, SPEECH_READ_TIMEOUT_SECONDS)

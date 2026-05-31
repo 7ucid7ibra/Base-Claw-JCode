@@ -26,7 +26,7 @@ This is a high-trust local tool, not a hardened multi-user service.
 
 ## Files
 
-- `app/telegram_codex_operator.py`
+- `app/telegram_operator.py`
 - `app/telegram_operator_ui.py`
 - `requirements/telegram-operator.txt`
 - `.env.telegram-operator.example`
@@ -131,7 +131,7 @@ Run only the Telegram operator:
 
 ```bash
 source .venv-telegram-agent/bin/activate
-python app/telegram_codex_operator.py
+python app/telegram_operator.py
 ```
 
 ## Telegram Commands
