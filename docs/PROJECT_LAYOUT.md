@@ -50,8 +50,6 @@ docs/
   TELEGRAM_OPERATOR.md
   TROUBLESHOOTING.md
   PUBLISHING.md
-overlays/
-  README.md
 agent_workspace/
   AGENT_HOME.md
 voice_assets/
@@ -66,6 +64,6 @@ Root convenience scripts:
 - `install.sh`
 - `start.sh`
 
-Runtime files such as `.env.telegram-operator`, `profiles/`, `overlays/private/`, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
+Runtime files such as `.env.telegram-operator`, `profiles/`, local private overlays, logs, SQLite databases, downloaded models, and generated audio stay local and are ignored by git.
 
 Only `agent_workspace/AGENT_HOME.md` is tracked. The installer and UI create ignored local workspace folders such as `skills/`, `automations/`, `projects/`, `slash_commands/`, `notes/`, `scratch/`, `artifacts/`, and `uploads/` for each workspace.
