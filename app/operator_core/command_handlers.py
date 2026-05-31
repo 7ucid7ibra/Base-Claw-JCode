@@ -4,9 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
-import sys
-from pathlib import Path
 from typing import Optional
 
 import requests
@@ -24,12 +21,11 @@ from operator_core.commands import (
     workspace_help_text,
 )
 from operator_core.config import codex_executable, parse_bool, startup_summary, update_operator_env
+from operator_core.updates import UpdateLifecycleMixin
 from speech import infer_kokoro_lang_code, readable_message_text, spoken_reply_text
 from telegram import Update
 from telegram.ext import ContextTypes
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OPERATOR_ENTRYPOINT = Path(__file__).resolve().parents[1] / "telegram_operator.py"
 LOGGER = logging.getLogger("telegram_operator")
 
 
@@ -45,7 +41,7 @@ def friendly_voice_error(exc: Exception) -> str:
     return detail[:500]
 
 
-class CommandHandlersMixin:
+class CommandHandlersMixin(UpdateLifecycleMixin):
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._record_incoming_message(
             update,
@@ -384,29 +380,6 @@ class CommandHandlersMixin:
             event_type="command_update_confirm",
             reply_markup=manual_update_keyboard(),
         )
-
-    def _spawn_replacement_operator(self) -> subprocess.Popen:
-        script_path = Path(__file__).resolve()
-        command = [sys.executable, str(script_path)]
-        creationflags = 0
-        if os.name == "nt":
-            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            creationflags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        return subprocess.Popen(
-            command,
-            cwd=str(PROJECT_ROOT),
-            env=os.environ.copy(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=os.name != "nt",
-            creationflags=creationflags,
-        )
-
-    async def _exit_after_restart(self, delay_seconds: float = 1.5) -> None:
-        await asyncio.sleep(delay_seconds)
-        LOGGER.info("Exiting old Telegram operator process after self-restart pid=%s", os.getpid())
-        os._exit(0)
 
     async def restart_operator(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat_id = update.effective_chat.id

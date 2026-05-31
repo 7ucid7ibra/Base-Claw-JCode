@@ -10,6 +10,7 @@ app/
     commands.py
     config.py
     storage.py
+    updates.py
   speech/
     server.py
     client.py
