@@ -4,6 +4,10 @@ The root is kept small so a new user can find the installer, environment example
 
 ```text
 app/
+  harnesses/
+    bridges.py
+    cli.py
+    desktop.py
   operator_core/
     attachments.py
     command_handlers.py
@@ -19,6 +23,7 @@ app/
     whisper_worker.py
   ui/
     speech_panel.py
+  process_utils.py
   telegram_operator.py
   telegram_operator_ui.py
 tools/
@@ -39,6 +44,7 @@ requirements/
   kokoro.txt
   telegram-operator.txt
 docs/
+  APP_ARCHITECTURE.md
   INSTALLATION_MODES.md
   KOKORO_REMOTE_USAGE.md
   TELEGRAM_OPERATOR.md
