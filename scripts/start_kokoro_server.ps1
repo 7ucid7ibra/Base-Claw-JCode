@@ -9,4 +9,4 @@ if (Test-Path $localEspeak) {
 }
 
 Set-Location $projectRoot
-& $python app\kokoro_server.py
+& $python app\speech\server.py

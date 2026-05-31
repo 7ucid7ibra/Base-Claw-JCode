@@ -894,7 +894,7 @@ def start_local_speech_host() -> tuple[bool, str]:
     python = local_speech_python_path()
     if not python.exists():
         return False, "Local speech support is not installed."
-    script = APP_DIR / "kokoro_server.py"
+    script = APP_DIR / "speech" / "server.py"
     kwargs: dict[str, Any] = {"cwd": str(BASE_DIR)}
     if sys.platform.startswith("win"):
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -918,7 +918,7 @@ def stop_local_speech_host() -> tuple[bool, str]:
             cmdline = " ".join(process.info.get("cmdline") or [])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        if "kokoro_server.py" not in cmdline:
+        if "app/speech/server.py" not in cmdline and "app\\speech\\server.py" not in cmdline:
             continue
         try:
             process.terminate()

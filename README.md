@@ -177,7 +177,7 @@ See `docs/INSTALLATION_MODES.md` for the full breakdown and `docs/TROUBLESHOOTIN
 ```powershell
 .\.venv-kokoro\Scripts\Activate.ps1
 $env:Path = "$PWD\tools\espeak-ng\eSpeak NG;$env:Path"
-python app\kokoro_server.py
+python app\speech\server.py
 ```
 
 The server binds to `0.0.0.0:8766`.
@@ -353,7 +353,7 @@ Basic checks:
 
 ```bash
 bash -n install.sh
-python -m py_compile app/telegram_operator_ui.py app/telegram_codex_operator.py app/kokoro_server.py
+python -m py_compile app/telegram_operator_ui.py app/telegram_codex_operator.py app/speech/server.py
 ```
 
 Also start Kokoro and confirm `/health`, `/voices`, and a real synthesis call before publishing a voice-enabled release.

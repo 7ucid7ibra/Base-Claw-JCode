@@ -61,5 +61,5 @@ app/
 - `app/harnesses/codex.py` and `app/codex_cli.py` are compatibility wrappers for older imports.
 - `app/harnesses/bridges.py` contains provider bridge classes.
 - `app/harnesses/desktop.py` contains desktop chat command construction.
-- `app/speech.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
+- `app/speech/client.py` currently holds speech client, text cleanup, Kokoro, and Whisper helpers until it is split into the target `speech/` package.
 - `tools/verify_install.py` and `tools/send_voice_note.py` are standalone utility scripts moved out of `app/`.

@@ -49,7 +49,7 @@ brew install ffmpeg espeak-ng
 ```powershell
 .\.venv-kokoro\Scripts\Activate.ps1
 $env:Path = "$PWD\tools\espeak-ng\eSpeak NG;$env:Path"
-python app\kokoro_server.py
+python app\speech\server.py
 ```
 
 Or on Windows:

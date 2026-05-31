@@ -65,7 +65,7 @@ start_server() {
     say "Speech server is not installed. Run: scripts/speech_server.sh install"
     exit 1
   fi
-  nohup "$PYTHON" app/kokoro_server.py >> "$LOG_FILE" 2>&1 &
+  nohup "$PYTHON" app/speech/server.py >> "$LOG_FILE" 2>&1 &
   printf '%s\n' "$!" > "$PID_FILE"
   for _ in $(seq 1 45); do
     if is_running; then
@@ -88,7 +88,7 @@ stop_server() {
     fi
     rm -f "$PID_FILE"
   fi
-  pkill -f "app/kokoro_server.py" >/dev/null 2>&1 || true
+  pkill -f "app/speech/server.py" >/dev/null 2>&1 || true
   if is_running; then
     say "Speech server still appears to be running at $URL."
     exit 1

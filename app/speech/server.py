@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 REPO_ID = "hexgrad/Kokoro-82M"
 SAMPLE_RATE = 24000
 APP_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = APP_DIR.parent
+PROJECT_ROOT = APP_DIR.parent.parent
 BASE_DIR = PROJECT_ROOT
 VOICE_ASSETS_DIR = PROJECT_ROOT / "voice_assets"
 CUSTOM_VOICES_DIR = VOICE_ASSETS_DIR / "custom"

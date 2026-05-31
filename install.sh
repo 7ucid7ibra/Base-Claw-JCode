@@ -347,7 +347,7 @@ setup_kokoro() {
     WITH_KOKORO=1
     setup_venv ".venv-kokoro" "requirements/kokoro.txt"
     say "Kokoro dependencies are installed. You can start the server with:"
-    say "  .venv-kokoro/bin/python app/kokoro_server.py"
+    say "  .venv-kokoro/bin/python app/speech/server.py"
   else
     WITH_KOKORO=0
     say "Skipped Kokoro setup."

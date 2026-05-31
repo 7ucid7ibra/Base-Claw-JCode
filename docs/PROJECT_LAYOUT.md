@@ -4,7 +4,10 @@ The root is kept small so a new user can find the installer, environment example
 
 ```text
 app/
-  kokoro_server.py
+  speech/
+    server.py
+    client.py
+    whisper_worker.py
   telegram_codex_operator.py
   telegram_operator_ui.py
 tools/
