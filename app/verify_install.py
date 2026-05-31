@@ -8,18 +8,13 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from harnesses.codex import resolve_codex_command
+from harnesses.cli import resolve_cli_command, resolve_codex_command
 
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
 BASE_DIR = PROJECT_ROOT
-PYTHON_FILES = [
-    "app/kokoro_server.py",
-    "app/kokoro_remote_telegram.py",
-    "app/telegram_codex_operator.py",
-    "app/telegram_operator_ui.py",
-]
+PYTHON_FILES = sorted(path for path in (PROJECT_ROOT / "app").rglob("*.py"))
 KOKORO_IMPORTS = [
     "fastapi",
     "faster_whisper",
@@ -57,8 +52,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def compile_python_files() -> None:
-    for name in PYTHON_FILES:
-        path = BASE_DIR / name
+    for path in PYTHON_FILES:
+        name = str(path.relative_to(BASE_DIR))
         if not path.exists():
             fail(f"missing {name}")
         result = subprocess.run(
@@ -136,26 +131,27 @@ def check_codex_command() -> None:
 
 
 def check_cli_command(name: str, install_hint: str) -> None:
-    executable = shutil.which(name)
-    if not executable:
+    try:
+        command = resolve_cli_command(name)
+    except RuntimeError:
         warn(f"{name} was not found on PATH. {install_hint}")
         return
     try:
         result = subprocess.run(
-            [executable, "--version"],
+            [*command.args, "--version"],
             cwd=BASE_DIR,
             text=True,
             capture_output=True,
             timeout=10,
         )
     except Exception:
-        ok(f"{name} found at {executable}")
+        ok(f"{name} found at {command.display}")
         return
     if result.returncode == 0:
-        version = (result.stdout or result.stderr).strip() or executable
+        version = (result.stdout or result.stderr).strip() or command.display
         ok(f"{name} found: {version}")
     else:
-        warn(f"{name} was found at {executable}, but did not return a version")
+        warn(f"{name} was found at {command.display}, but did not return a version")
 
 
 def check_kokoro_health() -> None:

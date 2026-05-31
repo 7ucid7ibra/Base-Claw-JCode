@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 import customtkinter as ctk
 import psutil
-from harnesses.codex import resolve_codex_command
+from harnesses.cli import resolve_codex_command
 from harnesses.desktop import build_desktop_agent_command, jcode_base_url
 
 APP_DIR = Path(__file__).resolve().parent

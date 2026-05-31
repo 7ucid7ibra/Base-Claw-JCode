@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 from harnesses.bridges import CodexBridge, build_agent_bridge
-from harnesses.codex import resolve_codex_command
+from harnesses.cli import resolve_codex_command
 from process_utils import hidden_subprocess_kwargs
 from speech import (
     KokoroVoiceReply,

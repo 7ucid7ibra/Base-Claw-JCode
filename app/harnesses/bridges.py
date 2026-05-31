@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from harnesses.codex import resolve_codex_command
+from harnesses.cli import resolve_codex_command
 from process_utils import agent_subprocess_env, hidden_subprocess_kwargs, terminate_process_tree
 
 APP_DIR = Path(__file__).resolve().parents[1]

@@ -4,7 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from harnesses.codex import resolve_codex_command
+from harnesses.cli import resolve_codex_command
 from process_utils import hidden_subprocess_kwargs
 
 
