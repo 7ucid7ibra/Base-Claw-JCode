@@ -245,6 +245,13 @@ if ($installHost) {
     }
     & ".\.venv-kokoro\Scripts\python.exe" -m pip install --upgrade pip
     & ".\.venv-kokoro\Scripts\python.exe" -m pip install -r requirements\kokoro.txt
+
+    Write-Step "Preparing Whisper transcription environment"
+    if (-not (Test-Path ".\.venv-whisper")) {
+        Invoke-BasePython @("-m", "venv", ".venv-whisper")
+    }
+    & ".\.venv-whisper\Scripts\python.exe" -m pip install --upgrade pip
+    & ".\.venv-whisper\Scripts\python.exe" -m pip install -r requirements\whisper.txt
 }
 
 if ($installClient) {

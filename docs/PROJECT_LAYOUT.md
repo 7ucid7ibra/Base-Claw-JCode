@@ -57,6 +57,7 @@ requirements/
   client.txt
   kokoro.txt
   telegram-operator.txt
+  whisper.txt
 docs/
   APP_ARCHITECTURE.md
   INSTALLATION_MODES.md

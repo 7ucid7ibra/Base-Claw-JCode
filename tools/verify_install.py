@@ -25,12 +25,14 @@ PYTHON_FILES = sorted(
 )
 KOKORO_IMPORTS = [
     "fastapi",
-    "faster_whisper",
     "kokoro",
     "numpy",
     "requests",
     "soundfile",
     "uvicorn",
+]
+WHISPER_IMPORTS = [
+    "faster_whisper",
 ]
 TELEGRAM_IMPORTS = [
     "customtkinter",
@@ -292,6 +294,7 @@ def main() -> None:
     check_refactor_boundaries()
     if args.mode in {"full", "host"}:
         check_imports("Kokoro env", venv_python(".venv-kokoro"), KOKORO_IMPORTS)
+        check_imports("Whisper env", venv_python(".venv-whisper"), WHISPER_IMPORTS)
         check_host_commands()
         check_kokoro_health()
     if args.mode in {"full", "client"}:
