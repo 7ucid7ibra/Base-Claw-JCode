@@ -18,13 +18,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 import customtkinter as ctk
 import psutil
 from harnesses.cli import resolve_codex_command
 from harnesses.desktop import build_desktop_agent_command, jcode_base_url
+from speech import is_local_speech_url, normalize_speech_url
+from speech.urls import tailscale_speech_urls, unique_urls
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
@@ -685,19 +687,6 @@ def gemini_model_options() -> list[str]:
     return ["", *(discovered or [model for model in GEMINI_FALLBACK_MODELS if model])]
 
 
-def normalize_speech_url(url: str) -> str:
-    url = url.strip().rstrip("/")
-    if url and "://" not in url:
-        url = "http://" + url
-    if url:
-        parts = urlsplit(url)
-        host_part = parts.netloc.rsplit("@", 1)[-1]
-        has_port = ":" in host_part and not host_part.endswith("]")
-        if parts.netloc and not has_port:
-            url = urlunsplit((parts.scheme or "http", f"{parts.netloc}:8766", parts.path, "", ""))
-    return url
-
-
 def host_from_url(url: str, default: str = "127.0.0.1") -> str:
     url = normalize_speech_url(url)
     if not url:
@@ -712,17 +701,6 @@ def port_from_url(url: str, default: str) -> str:
         return default
     parts = urlsplit(url)
     return str(parts.port or default)
-
-
-def is_local_host(host: str) -> bool:
-    return host.strip().lower() in {"", "127.0.0.1", "localhost", "0.0.0.0", "::1"}
-
-
-def is_local_speech_url(url: str) -> bool:
-    normalized = normalize_speech_url(url)
-    if not normalized:
-        return True
-    return is_local_host(urlsplit(normalized).hostname or "")
 
 
 def build_host_url(host: str, port: str, suffix: str = "") -> str:
@@ -752,38 +730,10 @@ def speech_health(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
-def tailscale_speech_urls() -> list[str]:
-    executable = shutil.which("tailscale") or shutil.which("tailscale.exe")
-    if not executable:
-        return []
-    try:
-        result = subprocess.run(
-            [executable, "ip", "-4"],
-            capture_output=True,
-            text=True,
-            timeout=4,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception:
-        return []
-    if result.returncode != 0:
-        return []
-    return [f"http://{line.strip()}:8766" for line in result.stdout.splitlines() if re.fullmatch(r"100(?:\.\d{1,3}){3}", line.strip())]
-
-
 def local_speech_urls() -> list[str]:
     urls = [DEFAULTS["TELEGRAM_OPERATOR_KOKORO_URL"]]
     urls.extend(tailscale_speech_urls())
-    unique = []
-    seen = set()
-    for url in urls:
-        normalized = normalize_speech_url(url)
-        if normalized and normalized not in seen:
-            unique.append(normalized)
-            seen.add(normalized)
-    return unique
+    return unique_urls(urls)
 
 
 def local_speech_python_path() -> Path:

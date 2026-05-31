@@ -15,6 +15,7 @@ app/
   speech/
     server.py
     client.py
+    urls.py
     whisper_worker.py
   telegram_operator.py
   telegram_operator_ui.py
