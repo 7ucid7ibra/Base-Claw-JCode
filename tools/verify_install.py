@@ -79,6 +79,7 @@ EXPECTED_LAUNCHER_FILES = [
     PROJECT_ROOT / "launchers" / "windows" / "start-ui.ps1",
 ]
 REMOVED_SCRIPT_FILES = [
+    PROJECT_ROOT / "installer" / "baseclaw.iss",
     PROJECT_ROOT / "scripts" / "build_macos_app.sh",
     PROJECT_ROOT / "scripts" / "build_macos_dmg.sh",
     PROJECT_ROOT / "scripts" / "build_windows_installer.ps1",

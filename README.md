@@ -28,9 +28,9 @@ BaseClaw is licensed under the Apache License 2.0. The project is intended to st
 ## Project Layout
 
 - `app/`: Python entry points for Kokoro, Telegram, and the UI.
-- `scripts/`: installer, build, and service helper scripts.
+- `scripts/`: installer, runtime, and service helper scripts.
 - `launchers/`: double-click and platform-specific launcher wrappers.
-- `packaging/`: installer packaging definitions.
+- `packaging/`: installer packaging definitions and build helpers.
 - `requirements/`: split Python dependency files for Kokoro and the Telegram operator.
 - `docs/`: usage, operator, troubleshooting, publishing, and layout notes.
 - `agent_workspace/`: the default assistant home.
