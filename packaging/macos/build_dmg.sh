@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if ! command -v hdiutil >/dev/null 2>&1; then
@@ -47,7 +47,7 @@ rsync -a --delete \
   --exclude "telegram_operator_*.jsonl" \
   "$ROOT_DIR/" "$PAYLOAD_DIR/"
 
-BASECLAW_APP_VERSION="$VERSION" "$PAYLOAD_DIR/scripts/build_macos_app.sh" "$PAYLOAD_DIR/BaseClaw.app"
+BASECLAW_APP_VERSION="$VERSION" "$PAYLOAD_DIR/packaging/macos/build_app.sh" "$PAYLOAD_DIR/BaseClaw.app"
 
 cat > "$STAGE_ROOT/README-FIRST.txt" <<'TXT'
 BaseClaw macOS alpha package

@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $stageDir = Join-Path $projectRoot "dist\windows-installer-stage"
 $issPath = Join-Path $projectRoot "packaging\windows\baseclaw.iss"
 
@@ -90,7 +90,7 @@ if (-not $iscc) {
     Write-Host ""
     Write-Host "Inno Setup compiler was not found."
     Write-Host "Install it with: winget install JRSoftware.InnoSetup"
-    Write-Host "Then rerun: .\scripts\build_windows_installer.ps1"
+    Write-Host "Then rerun: .\packaging\windows\build_installer.ps1"
     Write-Host "Staged installer files at: $stageDir"
     exit 2
 }

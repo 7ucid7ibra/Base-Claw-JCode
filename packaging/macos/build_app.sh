@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_DIR="${1:-$HOME/Applications/BaseClaw.app}"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+APP_DIR="${1:-$ROOT_DIR/dist/BaseClaw.app}"
 APP_VERSION="${BASECLAW_APP_VERSION:-0.1.0}"
 MACOS_DIR="$APP_DIR/Contents/MacOS"
 
@@ -42,31 +42,26 @@ version = sys.argv[2]
 path.write_text(path.read_text().replace("__BASECLAW_APP_VERSION__", version), encoding="utf-8")
 PY
 
-python3 - "$MACOS_DIR/BaseClaw" "$ROOT_DIR" <<'PY'
-from pathlib import Path
-import shlex
-import sys
-
-target = Path(sys.argv[1])
-root = sys.argv[2]
-target.write_text(
-    f"""#!/usr/bin/env bash
+cat > "$MACOS_DIR/BaseClaw" <<'SH'
+#!/usr/bin/env bash
 set -euo pipefail
 
-BASECLAW_ROOT={shlex.quote(root)}
+APP_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [[ ! -x "$BASECLAW_ROOT/start.sh" ]]; then
-  /usr/bin/osascript -e 'display dialog "BaseClaw could not find start.sh. Move the app back into the installed BaseClaw folder or reinstall the launcher." buttons {{"OK"}} default button "OK" with icon caution' >/dev/null 2>&1 || true
-  exit 1
-fi
+for candidate in "$APP_EXEC/../../.." "$APP_EXEC/../../../.."; do
+  candidate="$(cd "$candidate" && pwd)"
+  if [[ -x "$candidate/start.sh" ]]; then
+    cd "$candidate"
+    exec ./start.sh
+  fi
+done
 
-cd "$BASECLAW_ROOT"
-exec ./start.sh
-""",
-    encoding="utf-8",
-)
-PY
+echo "BaseClaw.app could not find start.sh next to the application bundle."
+echo "Use launchers/macos/install-macos.command for first setup, then launchers/macos/start-macos.command for daily startup."
+read -r -p "Press Return to close. " _
+exit 1
+SH
 
 chmod +x "$MACOS_DIR/BaseClaw"
 
-printf 'Installed BaseClaw launcher at %s\n' "$APP_DIR"
+printf 'Built %s\n' "$APP_DIR"

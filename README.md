@@ -70,7 +70,7 @@ On macOS, `install.sh` also creates a user-level launcher at `~/Applications/Bas
 On macOS you can also double-click `launchers/macos/install-macos.command` for first setup or `launchers/macos/start-macos.command` for daily startup. To generate a simple local `BaseClaw.app` wrapper, run:
 
 ```bash
-./scripts/build_macos_app.sh
+./packaging/macos/build_app.sh
 ```
 
 The generated app is placed under `dist/` and is intentionally not committed. It is a convenience wrapper around `./start.sh`.
@@ -78,7 +78,7 @@ The generated app is placed under `dist/` and is intentionally not committed. It
 To build an alpha macOS DMG from a clean staged copy, run:
 
 ```bash
-./scripts/build_macos_dmg.sh
+./packaging/macos/build_dmg.sh
 ```
 
 The DMG is written under `dist/`. It is not signed or notarized yet, so macOS may require Control-click, then Open.
@@ -127,7 +127,7 @@ The wizard lets you choose client/full/speech-host mode, JCode, Codex, Claude, G
 To build a normal Windows setup executable, install Inno Setup and run:
 
 ```powershell
-.\scripts\build_windows_installer.ps1
+.\packaging\windows\build_installer.ps1
 ```
 
 The build script stages a clean copy, excludes local secrets, virtual environments, logs, and SQLite state, then writes `dist\BaseClawSetup.exe`.
