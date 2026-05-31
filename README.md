@@ -83,7 +83,7 @@ To build an alpha macOS DMG from a clean staged copy, run:
 
 The DMG is written under `dist/`. It is not signed or notarized yet, so macOS may require Control-click, then Open.
 
-The Runtime panel has an Update button that pulls the newest public BaseClaw archive from GitHub and overlays it onto the current install. Restart the UI manually after the update finishes.
+The Runtime panel has an Update button that pulls the newest public BaseClaw archive from GitHub and applies it to the current install. Restart the UI manually after the update finishes.
 
 Useful options:
 

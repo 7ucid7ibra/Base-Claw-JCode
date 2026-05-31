@@ -47,5 +47,4 @@ Do not include:
 - `telegram_operator_memory.jsonl`
 - local voice/model/cache folders
 - generated screenshots or audio test files
-- private local overlay folders
 - supervisor-specific profile folders under `profiles/`
